@@ -1,30 +1,38 @@
-# MemPuck for ATS Mini — Android radio-control slice v002
+# MemPuck for ATS Mini — frequency-driven radio control v003
 
-This checkpoint keeps the proven Android BLE foundation and adds the first
-usable MemPuck VFO screen on real ATS Mini hardware.
+This checkpoint keeps the proven Pixel 6 BLE and absolute-tuning foundation,
+while making the controls follow the ATS Mini's actual receiver coverage.
 
-## Included
+## Frequency-driven operation
+
+MemPuck no longer offers impossible mode/frequency combinations:
+
+- **150 kHz through 30 MHz:** show `LSB | USB | CW | AM`.
+- **64 through 108 MHz:** hide the mode row and select `FM` automatically.
+- **Above 30 MHz and below 64 MHz:** reject direct entry without sending a BLE
+  command because the ATS Mini cannot tune that gap.
+
+MemPuck remembers the last low-band mode. Returning from FM restores that mode.
+If no valid low-band mode is available, AM is the safe fallback.
+
+Digit and VFO controls tune immediately, so they jump directly between 30 MHz
+and 64 MHz when crossing the unsupported gap. Direct text entry remains strict
+and reports an error for a frequency in the gap.
+
+## Included foundation
 
 - Native Kotlin and Jetpack Compose application.
-- Pixel 6 as the primary hardware target; minSdk 26 for later inexpensive
-  dedicated Android controllers.
+- Pixel 6 as the primary hardware target; minSdk 26 for inexpensive dedicated
+  Android controllers later.
 - BLE scan, connection, Nordic UART notifications, and automatic `Z?`
   capability negotiation.
-- ATS Mini 15-field live monitor parsing for frequency, mode, band, step,
-  bandwidth, volume, RSSI, SNR, voltage, firmware version, and sequence.
-- Automatic status-monitor startup without blindly toggling off an already
-  active stream.
+- ATS Mini 15-field live monitor parsing.
 - Direct absolute tuning through `Z<frequency_hz>,<mode>` with confirmation and
   timeout handling.
-- Logical MemPuck `CW` mode translated to ATS `USB`. The future ATS firmware
-  CW/filter enhancement remains a separate build.
-- Portrait interface copied from the existing MemPuck web layout rather than
-  redesigned for Android.
-- Canonical dark and light MemPuck themes, selectable in CONFIG and persisted.
-- Digit-by-digit frequency controls, direct frequency entry, mode row, and VFO
-  step controls.
-- BLE setup, capability state, device selection, and protocol log moved into
-  the MemPuck-style CONFIG tab.
+- Logical MemPuck `CW` mode translated to ATS `USB`.
+- Portrait interface copied from the existing MemPuck web layout.
+- Dark and light MemPuck themes.
+- Digit-by-digit controls, direct entry, and VFO step controls.
 
 ## Deliberately not included yet
 
@@ -35,8 +43,6 @@ usable MemPuck VFO screen on real ATS Mini hardware.
 - Automatic reconnect.
 - ATS memory-slot management.
 
-Those remain separate hardware-testable checkpoints.
-
 ## Receiver setup
 
 On the ATS Mini:
@@ -45,7 +51,8 @@ On the ATS Mini:
 Settings → Bluetooth → Ad hoc
 ```
 
-The patched firmware should answer:
+For development, leave ATS sleep mode set to **Unlocked**. The patched firmware
+should answer:
 
 ```text
 Z?\r  →  OK,Z,1

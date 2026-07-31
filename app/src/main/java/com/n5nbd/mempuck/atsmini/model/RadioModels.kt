@@ -31,6 +31,9 @@ enum class RadioMode(
     FM("FM", "FM"),
     ;
 
+    val isLowBandMode: Boolean
+        get() = this != FM
+
     companion object {
         fun fromAts(value: String): RadioMode? = when (value.uppercase()) {
             "LSB" -> LSB
@@ -89,6 +92,7 @@ data class RadioSnapshot(
     val status: AtsStatus? = null,
     val targetFrequencyHz: Long = 7_074_000L,
     val selectedMode: RadioMode = RadioMode.USB,
+    val lastLowBandMode: RadioMode = RadioMode.USB,
     val tuneState: TuneState = TuneState.Idle,
     val log: List<String> = emptyList(),
 )

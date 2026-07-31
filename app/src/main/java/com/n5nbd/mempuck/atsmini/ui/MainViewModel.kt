@@ -14,7 +14,8 @@ class MainViewModel(private val repository: RadioRepository) : ViewModel() {
     fun connect(device: AtsDevice) = repository.connect(device)
     fun disconnect() = repository.disconnect()
     fun probeCapability() = repository.probeCapability()
-    fun tune(frequencyHz: Long, mode: RadioMode) = repository.tune(frequencyHz, mode)
+    fun tuneFrequency(frequencyHz: Long) = repository.tuneFrequency(frequencyHz)
+    fun selectLowBandMode(mode: RadioMode) = repository.selectLowBandMode(mode)
 
     companion object {
         fun factory(repository: RadioRepository): ViewModelProvider.Factory =

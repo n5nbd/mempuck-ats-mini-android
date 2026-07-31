@@ -5,6 +5,8 @@ import android.os.Handler
 import android.os.Looper
 import com.n5nbd.mempuck.atsmini.ble.AtsBleClient
 import com.n5nbd.mempuck.atsmini.model.AtsDevice
+import com.n5nbd.mempuck.atsmini.model.AtsFrequencyPlan
+import com.n5nbd.mempuck.atsmini.model.AtsFrequencyRegion
 import com.n5nbd.mempuck.atsmini.model.CapabilityState
 import com.n5nbd.mempuck.atsmini.model.LinkState
 import com.n5nbd.mempuck.atsmini.model.RadioMode
@@ -101,7 +103,32 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         }
     }
 
-    fun tune(frequencyHz: Long, logicalMode: RadioMode) {
+    fun tuneFrequency(frequencyHz: Long) {
+        val current = _state.value
+        val logicalMode = AtsFrequencyPlan.modeForFrequency(
+            frequencyHz = frequencyHz,
+            lastLowBandMode = current.lastLowBandMode,
+        )
+        if (logicalMode == null) {
+            setTuneFailure(AtsFrequencyPlan.validationMessage(frequencyHz))
+            return
+        }
+        tuneResolved(frequencyHz, logicalMode)
+    }
+
+    fun selectLowBandMode(logicalMode: RadioMode) {
+        if (!logicalMode.isLowBandMode) {
+            setTuneFailure("FM is selected automatically by frequency")
+            return
+        }
+        if (AtsFrequencyPlan.regionFor(_state.value.targetFrequencyHz) != AtsFrequencyRegion.LowBand) {
+            setTuneFailure("Low-band modes are available only at 30 MHz and below")
+            return
+        }
+        tuneResolved(_state.value.targetFrequencyHz, logicalMode)
+    }
+
+    private fun tuneResolved(frequencyHz: Long, logicalMode: RadioMode) {
         if (_state.value.link !is LinkState.Ready) {
             setTuneFailure("ATS Mini is not connected")
             return
@@ -110,17 +137,29 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
             setTuneFailure("Absolute tuning is not supported by this firmware")
             return
         }
-        if (frequencyHz !in MIN_FREQUENCY_HZ..MAX_FREQUENCY_HZ) {
-            setTuneFailure("Frequency is outside the ATS Mini coverage")
+
+        val region = AtsFrequencyPlan.regionFor(frequencyHz)
+        if (region == AtsFrequencyRegion.Unsupported) {
+            setTuneFailure(AtsFrequencyPlan.validationMessage(frequencyHz))
+            return
+        }
+        if (region == AtsFrequencyRegion.BroadcastFm && logicalMode != RadioMode.FM) {
+            setTuneFailure("Broadcast FM mode is selected automatically by frequency")
+            return
+        }
+        if (region == AtsFrequencyRegion.LowBand && !logicalMode.isLowBandMode) {
+            setTuneFailure("FM is unavailable at 30 MHz and below")
             return
         }
 
         val command = AtsAdHocProtocol.absoluteTuneCommand(frequencyHz, logicalMode)
         pendingLogicalMode = logicalMode
         mainHandler.removeCallbacks(tuneTimeout)
-        _state.value = _state.value.copy(
+        val current = _state.value
+        _state.value = current.copy(
             targetFrequencyHz = frequencyHz,
             selectedMode = logicalMode,
+            lastLowBandMode = if (logicalMode.isLowBandMode) logicalMode else current.lastLowBandMode,
             tuneState = TuneState.Sending(frequencyHz, logicalMode),
         )
         appendLog("TX  ${command.trim()}")
@@ -191,9 +230,11 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
                     mainHandler.removeCallbacks(tuneTimeout)
                     val logical = pendingLogicalMode ?: event.mode
                     pendingLogicalMode = null
-                    _state.value = _state.value.copy(
+                    val current = _state.value
+                    _state.value = current.copy(
                         targetFrequencyHz = event.frequencyHz,
                         selectedMode = logical,
+                        lastLowBandMode = if (logical.isLowBandMode) logical else current.lastLowBandMode,
                         tuneState = TuneState.Confirmed(event.frequencyHz, logical, event.mode),
                     )
                 }
@@ -206,14 +247,22 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
                         event.value.mode == RadioMode.USB &&
                         event.value.frequencyHz == current.targetFrequencyHz
                     val sending = current.tuneState is TuneState.Sending
+                    val reportedLogicalMode = when {
+                        sending -> current.selectedMode
+                        AtsFrequencyPlan.regionFor(event.value.frequencyHz) == AtsFrequencyRegion.BroadcastFm ->
+                            RadioMode.FM
+                        keepLogicalCw -> RadioMode.CW
+                        else -> event.value.mode
+                    }
                     _state.value = current.copy(
                         status = event.value,
                         statusStream = StatusStreamState.Active,
                         targetFrequencyHz = if (sending) current.targetFrequencyHz else event.value.frequencyHz,
-                        selectedMode = when {
-                            sending -> current.selectedMode
-                            keepLogicalCw -> RadioMode.CW
-                            else -> event.value.mode
+                        selectedMode = reportedLogicalMode,
+                        lastLowBandMode = if (reportedLogicalMode.isLowBandMode) {
+                            reportedLogicalMode
+                        } else {
+                            current.lastLowBandMode
                         },
                     )
                 }
@@ -264,7 +313,5 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         const val CAPABILITY_TIMEOUT_MS = 3_000L
         const val TUNE_TIMEOUT_MS = 3_000L
         const val MONITOR_PRESENCE_WINDOW_MS = 1_200L
-        const val MIN_FREQUENCY_HZ = 150_000L
-        const val MAX_FREQUENCY_HZ = 108_000_000L
     }
 }

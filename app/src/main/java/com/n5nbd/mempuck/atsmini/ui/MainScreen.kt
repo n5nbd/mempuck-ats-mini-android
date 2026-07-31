@@ -44,6 +44,8 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
+import com.n5nbd.mempuck.atsmini.model.AtsFrequencyPlan
+import com.n5nbd.mempuck.atsmini.model.AtsFrequencyRegion
 import com.n5nbd.mempuck.atsmini.model.CapabilityState
 import com.n5nbd.mempuck.atsmini.model.LinkState
 import com.n5nbd.mempuck.atsmini.model.RadioMode
@@ -125,7 +127,12 @@ fun MainScreen(
                 )
 
                 when (tab) {
-                    AppTab.Radio -> RadioScreen(state, colors, viewModel::tune)
+                    AppTab.Radio -> RadioScreen(
+                        state = state,
+                        colors = colors,
+                        tuneFrequency = viewModel::tuneFrequency,
+                        selectLowBandMode = viewModel::selectLowBandMode,
+                    )
                     AppTab.List -> PlaceholderScreen(
                         title = "LIST",
                         message = "Personal memories arrive after the live VFO control loop is proven.",
@@ -219,7 +226,8 @@ private fun Header(
 private fun RadioScreen(
     state: RadioSnapshot,
     colors: PuckColors,
-    tune: (Long, RadioMode) -> Unit,
+    tuneFrequency: (Long) -> Unit,
+    selectLowBandMode: (RadioMode) -> Unit,
 ) {
     PuckPanel(colors = colors) {
         Row(
@@ -245,7 +253,7 @@ private fun RadioScreen(
             frequencyHz = state.targetFrequencyHz,
             enabled = canTune(state),
             colors = colors,
-            onChange = { newFrequency -> tune(newFrequency, state.selectedMode) },
+            onChange = tuneFrequency,
         )
 
         Spacer(Modifier.height(16.dp))
@@ -254,30 +262,32 @@ private fun RadioScreen(
             frequencyHz = state.targetFrequencyHz,
             enabled = canTune(state),
             colors = colors,
-            onTune = { tune(it, state.selectedMode) },
+            onTune = tuneFrequency,
         )
 
         Spacer(Modifier.height(10.dp))
 
-        Row(
-            modifier = Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.spacedBy(6.dp),
-        ) {
-            RadioMode.entries.forEach { mode ->
-                PuckButton(
-                    text = mode.label,
-                    selected = state.selectedMode == mode,
-                    colors = colors,
-                    enabled = canTune(state),
-                    onClick = { tune(state.targetFrequencyHz, mode) },
-                    modifier = Modifier.weight(1f),
-                    height = 57.dp,
-                    fontSize = 17.sp,
-                )
+        if (AtsFrequencyPlan.regionFor(state.targetFrequencyHz) == AtsFrequencyRegion.LowBand) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+            ) {
+                LOW_BAND_MODES.forEach { mode ->
+                    PuckButton(
+                        text = mode.label,
+                        selected = state.selectedMode == mode,
+                        colors = colors,
+                        enabled = canTune(state),
+                        onClick = { selectLowBandMode(mode) },
+                        modifier = Modifier.weight(1f),
+                        height = 57.dp,
+                        fontSize = 17.sp,
+                    )
+                }
             }
-        }
 
-        Spacer(Modifier.height(10.dp))
+            Spacer(Modifier.height(10.dp))
+        }
 
         StatusBlock(state, colors)
 
@@ -292,7 +302,7 @@ private fun RadioScreen(
                 text = "<<",
                 colors = colors,
                 enabled = canTune(state),
-                onClick = { tuneOffset(state, -stepHz * 10L, tune) },
+                onClick = { tuneOffset(state, -stepHz * 10L, tuneFrequency) },
                 modifier = Modifier.weight(1f),
                 height = 57.dp,
             )
@@ -300,7 +310,7 @@ private fun RadioScreen(
                 text = "<",
                 colors = colors,
                 enabled = canTune(state),
-                onClick = { tuneOffset(state, -stepHz, tune) },
+                onClick = { tuneOffset(state, -stepHz, tuneFrequency) },
                 modifier = Modifier.weight(1f),
                 height = 57.dp,
             )
@@ -317,7 +327,7 @@ private fun RadioScreen(
                 text = ">",
                 colors = colors,
                 enabled = canTune(state),
-                onClick = { tuneOffset(state, stepHz, tune) },
+                onClick = { tuneOffset(state, stepHz, tuneFrequency) },
                 modifier = Modifier.weight(1f),
                 height = 57.dp,
             )
@@ -325,7 +335,7 @@ private fun RadioScreen(
                 text = ">>",
                 colors = colors,
                 enabled = canTune(state),
-                onClick = { tuneOffset(state, stepHz * 10L, tune) },
+                onClick = { tuneOffset(state, stepHz * 10L, tuneFrequency) },
                 modifier = Modifier.weight(1f),
                 height = 57.dp,
             )
@@ -352,8 +362,22 @@ private fun FrequencyDigits(
                 digit = digit,
                 enabled = enabled,
                 colors = colors,
-                onUp = { onChange((frequencyHz + place).coerceAtMost(MAX_FREQUENCY_HZ)) },
-                onDown = { onChange((frequencyHz - place).coerceAtLeast(MIN_FREQUENCY_HZ)) },
+                onUp = {
+                    onChange(
+                        AtsFrequencyPlan.normalizeInteractiveFrequency(
+                            currentFrequencyHz = frequencyHz,
+                            candidateFrequencyHz = frequencyHz + place,
+                        ),
+                    )
+                },
+                onDown = {
+                    onChange(
+                        AtsFrequencyPlan.normalizeInteractiveFrequency(
+                            currentFrequencyHz = frequencyHz,
+                            candidateFrequencyHz = frequencyHz - place,
+                        ),
+                    )
+                },
                 modifier = Modifier.weight(1f),
             )
             val digitsRemaining = digits.length - index - 1
@@ -781,10 +805,13 @@ private fun frequencyDigits(frequencyHz: Long): String =
 private fun tuneOffset(
     state: RadioSnapshot,
     offsetHz: Long,
-    tune: (Long, RadioMode) -> Unit,
+    tuneFrequency: (Long) -> Unit,
 ) {
-    val target = (state.targetFrequencyHz + offsetHz).coerceIn(MIN_FREQUENCY_HZ, MAX_FREQUENCY_HZ)
-    tune(target, state.selectedMode)
+    val target = AtsFrequencyPlan.normalizeInteractiveFrequency(
+        currentFrequencyHz = state.targetFrequencyHz,
+        candidateFrequencyHz = state.targetFrequencyHz + offsetHz,
+    )
+    tuneFrequency(target)
 }
 
 private fun statusStepHz(step: String?): Long {
@@ -811,5 +838,9 @@ private val POWERS_OF_TEN = longArrayOf(
     100_000_000L,
 )
 
-private const val MIN_FREQUENCY_HZ = 150_000L
-private const val MAX_FREQUENCY_HZ = 108_000_000L
+private val LOW_BAND_MODES = listOf(
+    RadioMode.LSB,
+    RadioMode.USB,
+    RadioMode.CW,
+    RadioMode.AM,
+)
