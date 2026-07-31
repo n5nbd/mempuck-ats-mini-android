@@ -16,6 +16,9 @@ class MainViewModel(private val repository: RadioRepository) : ViewModel() {
     fun probeCapability() = repository.probeCapability()
     fun tuneFrequency(frequencyHz: Long) = repository.tuneFrequency(frequencyHz)
     fun selectLowBandMode(mode: RadioMode) = repository.selectLowBandMode(mode)
+    fun startVfoScan(stepHz: Long) = repository.startVfoScan(stepHz)
+    fun stopVfoScan() = repository.stopVfoScan()
+    fun setVolume(volume: Int) = repository.setVolume(volume)
 
     companion object {
         fun factory(repository: RadioRepository): ViewModelProvider.Factory =

@@ -1,5 +1,17 @@
 # Changelog
 
+## v004 — VFO/MEM, hold scanning, and volume
+
+- Converted the center VFO button into a dual-state `VFO` / `MEM` control.
+- Preserved the already working VFO arrow tuning behavior.
+- Added press-and-hold scanning to every frequency digit arrow; release stops
+  scanning.
+- Used one shared 1.5-second dwell constant for VFO scanning and the future
+  memory scanner.
+- Removed the explanatory direct-frequency label beneath the digit wheels.
+- Added a horizontal 0–63 ATS volume slider beneath the arrow controls.
+- Kept MEM mode visible but inert until the personal-memory slice lands.
+
 ## v003 — frequency-driven ATS mode selection
 
 - Removed the impossible FM button from the low-band mode row.

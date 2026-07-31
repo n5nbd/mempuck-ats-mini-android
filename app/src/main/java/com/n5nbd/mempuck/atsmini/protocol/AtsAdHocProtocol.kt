@@ -132,6 +132,8 @@ class AtsAdHocProtocol {
     companion object {
         const val CAPABILITY_COMMAND = "Z?\r"
         const val STATUS_TOGGLE_COMMAND = "t"
+        const val VOLUME_UP_COMMAND = "V"
+        const val VOLUME_DOWN_COMMAND = "v"
 
         fun absoluteTuneCommand(frequencyHz: Long, mode: RadioMode): String =
             "Z$frequencyHz,${mode.atsMode}\r"

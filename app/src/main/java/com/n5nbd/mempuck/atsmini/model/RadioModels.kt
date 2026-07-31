@@ -94,5 +94,6 @@ data class RadioSnapshot(
     val selectedMode: RadioMode = RadioMode.USB,
     val lastLowBandMode: RadioMode = RadioMode.USB,
     val tuneState: TuneState = TuneState.Idle,
+    val vfoScanning: Boolean = false,
     val log: List<String> = emptyList(),
 )

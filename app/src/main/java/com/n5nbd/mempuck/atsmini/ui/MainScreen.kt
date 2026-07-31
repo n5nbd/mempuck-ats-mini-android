@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,11 +21,15 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -33,6 +38,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -53,6 +59,7 @@ import com.n5nbd.mempuck.atsmini.model.RadioSnapshot
 import com.n5nbd.mempuck.atsmini.model.StatusStreamState
 import com.n5nbd.mempuck.atsmini.model.TuneState
 import kotlin.math.abs
+import kotlin.math.roundToInt
 
 private val PanelShape = RoundedCornerShape(5.dp)
 
@@ -132,6 +139,9 @@ fun MainScreen(
                         colors = colors,
                         tuneFrequency = viewModel::tuneFrequency,
                         selectLowBandMode = viewModel::selectLowBandMode,
+                        startVfoScan = viewModel::startVfoScan,
+                        stopVfoScan = viewModel::stopVfoScan,
+                        setVolume = viewModel::setVolume,
                     )
                     AppTab.List -> PlaceholderScreen(
                         title = "LIST",
@@ -228,7 +238,17 @@ private fun RadioScreen(
     colors: PuckColors,
     tuneFrequency: (Long) -> Unit,
     selectLowBandMode: (RadioMode) -> Unit,
+    startVfoScan: (Long) -> Unit,
+    stopVfoScan: () -> Unit,
+    setVolume: (Int) -> Unit,
 ) {
+    var memoryMode by rememberSaveable { mutableStateOf(false) }
+    val vfoEnabled = !memoryMode && canTune(state)
+
+    DisposableEffect(Unit) {
+        onDispose(stopVfoScan)
+    }
+
     PuckPanel(colors = colors) {
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -251,16 +271,18 @@ private fun RadioScreen(
 
         FrequencyDigits(
             frequencyHz = state.targetFrequencyHz,
-            enabled = canTune(state),
+            enabled = vfoEnabled,
             colors = colors,
             onChange = tuneFrequency,
+            onScanStart = startVfoScan,
+            onScanStop = stopVfoScan,
         )
 
         Spacer(Modifier.height(16.dp))
 
         DirectFrequencyEntry(
             frequencyHz = state.targetFrequencyHz,
-            enabled = canTune(state),
+            enabled = vfoEnabled,
             colors = colors,
             onTune = tuneFrequency,
         )
@@ -277,7 +299,7 @@ private fun RadioScreen(
                         text = mode.label,
                         selected = state.selectedMode == mode,
                         colors = colors,
-                        enabled = canTune(state),
+                        enabled = vfoEnabled,
                         onClick = { selectLowBandMode(mode) },
                         modifier = Modifier.weight(1f),
                         height = 57.dp,
@@ -301,7 +323,7 @@ private fun RadioScreen(
             PuckButton(
                 text = "<<",
                 colors = colors,
-                enabled = canTune(state),
+                enabled = vfoEnabled,
                 onClick = { tuneOffset(state, -stepHz * 10L, tuneFrequency) },
                 modifier = Modifier.weight(1f),
                 height = 57.dp,
@@ -309,24 +331,26 @@ private fun RadioScreen(
             PuckButton(
                 text = "<",
                 colors = colors,
-                enabled = canTune(state),
+                enabled = vfoEnabled,
                 onClick = { tuneOffset(state, -stepHz, tuneFrequency) },
                 modifier = Modifier.weight(1f),
                 height = 57.dp,
             )
             PuckButton(
-                text = "VFO",
+                text = if (memoryMode) "MEM" else "VFO",
                 selected = true,
                 colors = colors,
-                enabled = false,
-                onClick = {},
+                onClick = {
+                    stopVfoScan()
+                    memoryMode = !memoryMode
+                },
                 modifier = Modifier.weight(1.4f),
                 height = 57.dp,
             )
             PuckButton(
                 text = ">",
                 colors = colors,
-                enabled = canTune(state),
+                enabled = vfoEnabled,
                 onClick = { tuneOffset(state, stepHz, tuneFrequency) },
                 modifier = Modifier.weight(1f),
                 height = 57.dp,
@@ -334,12 +358,21 @@ private fun RadioScreen(
             PuckButton(
                 text = ">>",
                 colors = colors,
-                enabled = canTune(state),
+                enabled = vfoEnabled,
                 onClick = { tuneOffset(state, stepHz * 10L, tuneFrequency) },
                 modifier = Modifier.weight(1f),
                 height = 57.dp,
             )
         }
+
+        Spacer(Modifier.height(10.dp))
+
+        VolumeControl(
+            reportedVolume = state.status?.volume,
+            enabled = state.link is LinkState.Ready && state.status != null,
+            colors = colors,
+            onVolumeSelected = setVolume,
+        )
     }
 }
 
@@ -349,6 +382,8 @@ private fun FrequencyDigits(
     enabled: Boolean,
     colors: PuckColors,
     onChange: (Long) -> Unit,
+    onScanStart: (Long) -> Unit,
+    onScanStop: () -> Unit,
 ) {
     val digits = frequencyDigits(frequencyHz)
     Row(
@@ -378,6 +413,9 @@ private fun FrequencyDigits(
                         ),
                     )
                 },
+                onScanUp = { onScanStart(place) },
+                onScanDown = { onScanStart(-place) },
+                onScanStop = onScanStop,
                 modifier = Modifier.weight(1f),
             )
             val digitsRemaining = digits.length - index - 1
@@ -402,6 +440,9 @@ private fun DigitControl(
     colors: PuckColors,
     onUp: () -> Unit,
     onDown: () -> Unit,
+    onScanUp: () -> Unit,
+    onScanDown: () -> Unit,
+    onScanStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -411,7 +452,15 @@ private fun DigitControl(
             .alpha(if (enabled) 1f else 0.55f),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        DigitArea("▲", colors, enabled, onUp, Modifier.weight(1f))
+        DigitArea(
+            text = "▲",
+            colors = colors,
+            enabled = enabled,
+            onClick = onUp,
+            onHoldStart = onScanUp,
+            onHoldEnd = onScanStop,
+            modifier = Modifier.weight(1f),
+        )
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -437,7 +486,15 @@ private fun DigitControl(
                 .height(1.dp)
                 .background(colors.foreground),
         )
-        DigitArea("▼", colors, enabled, onDown, Modifier.weight(1f))
+        DigitArea(
+            text = "▼",
+            colors = colors,
+            enabled = enabled,
+            onClick = onDown,
+            onHoldStart = onScanDown,
+            onHoldEnd = onScanStop,
+            modifier = Modifier.weight(1f),
+        )
     }
 }
 
@@ -447,12 +504,31 @@ private fun DigitArea(
     colors: PuckColors,
     enabled: Boolean,
     onClick: () -> Unit,
+    onHoldStart: () -> Unit,
+    onHoldEnd: () -> Unit,
     modifier: Modifier,
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .clickable(enabled = enabled, onClick = onClick),
+            .pointerInput(enabled, onClick, onHoldStart, onHoldEnd) {
+                if (!enabled) return@pointerInput
+                var longPressActive = false
+                detectTapGestures(
+                    onPress = {
+                        tryAwaitRelease()
+                        if (longPressActive) {
+                            longPressActive = false
+                            onHoldEnd()
+                        }
+                    },
+                    onLongPress = {
+                        longPressActive = true
+                        onHoldStart()
+                    },
+                    onTap = { onClick() },
+                )
+            },
         contentAlignment = Alignment.Center,
     ) {
         Text(
@@ -478,12 +554,6 @@ private fun DirectFrequencyEntry(
         value = formatFrequencyHz(frequencyHz)
     }
 
-    Text(
-        text = "DIRECT FREQUENCY — PRESS ENTER TO TUNE",
-        fontSize = 13.sp,
-        fontWeight = FontWeight.Bold,
-    )
-    Spacer(Modifier.height(4.dp))
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -516,6 +586,63 @@ private fun DirectFrequencyEntry(
                 },
             ),
             modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+@Composable
+private fun VolumeControl(
+    reportedVolume: Int?,
+    enabled: Boolean,
+    colors: PuckColors,
+    onVolumeSelected: (Int) -> Unit,
+) {
+    var sliderValue by remember { mutableFloatStateOf((reportedVolume ?: 0).toFloat()) }
+    var dragging by remember { mutableStateOf(false) }
+
+    LaunchedEffect(reportedVolume, dragging) {
+        if (!dragging && reportedVolume != null) {
+            sliderValue = reportedVolume.toFloat()
+        }
+    }
+
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(
+            text = "VOL",
+            fontWeight = FontWeight.Black,
+            fontSize = 15.sp,
+        )
+        Slider(
+            value = sliderValue,
+            onValueChange = {
+                dragging = true
+                sliderValue = it
+            },
+            onValueChangeFinished = {
+                dragging = false
+                onVolumeSelected(sliderValue.roundToInt())
+            },
+            enabled = enabled,
+            valueRange = 0f..63f,
+            colors = SliderDefaults.colors(
+                thumbColor = colors.foreground,
+                activeTrackColor = colors.foreground,
+                inactiveTrackColor = colors.muted,
+                disabledThumbColor = colors.muted,
+                disabledActiveTrackColor = colors.muted,
+                disabledInactiveTrackColor = colors.muted.copy(alpha = 0.45f),
+            ),
+            modifier = Modifier.weight(1f),
+        )
+        Text(
+            text = sliderValue.roundToInt().toString().padStart(2, '0'),
+            fontFamily = FontFamily.Monospace,
+            fontWeight = FontWeight.Black,
+            fontSize = 16.sp,
         )
     }
 }
