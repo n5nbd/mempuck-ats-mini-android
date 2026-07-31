@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.1-dev8
+
+- Added a dedicated V4 rising-sun launcher icon.
+- Prepared a local end-of-night Android checkpoint without pushing.
+
 ## v007 — connect shortcut, compact FM display, and release-volume
 
 - Turned the disconnected RADIO status panel into a connection shortcut that
