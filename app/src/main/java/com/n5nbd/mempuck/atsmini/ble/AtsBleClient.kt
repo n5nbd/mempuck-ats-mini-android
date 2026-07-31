@@ -2,6 +2,7 @@ package com.n5nbd.mempuck.atsmini.ble
 
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
+import android.bluetooth.BluetoothDevice
 import android.bluetooth.BluetoothGatt
 import android.bluetooth.BluetoothGattCallback
 import android.bluetooth.BluetoothGattCharacteristic
@@ -224,7 +225,14 @@ class AtsBleClient(
 
         target = device
         listener.onConnecting(device)
-        gatt = remote.connectGatt(appContext, false, gattCallback, BluetoothGatt.TRANSPORT_LE)
+        // ATS Mini Ad hoc mode is BLE GATT only; request LE explicitly so
+        // Android never attempts a BR/EDR transport for a dual-mode adapter.
+        gatt = remote.connectGatt(
+            appContext,
+            false,
+            gattCallback,
+            BluetoothDevice.TRANSPORT_LE,
+        )
         if (gatt == null) listener.onError("Android could not create a GATT connection")
     }
 
