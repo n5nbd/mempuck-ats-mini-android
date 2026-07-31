@@ -144,6 +144,11 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         tuneResolved(receiverFrequencyHz, logicalMode)
     }
 
+    fun recallMemory(frequencyHz: Long, logicalMode: RadioMode) {
+        val receiverFrequencyHz = AtsFrequencyPlan.normalizeReceiverFrequency(frequencyHz)
+        tuneResolved(receiverFrequencyHz, logicalMode)
+    }
+
     fun selectLowBandMode(logicalMode: RadioMode) {
         if (!logicalMode.isLowBandMode) {
             setTuneFailure("FM is selected automatically by frequency")

@@ -15,16 +15,21 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.n5nbd.mempuck.atsmini.ble.hasBluetoothPermissions
 import com.n5nbd.mempuck.atsmini.ble.requiredBluetoothPermissions
+import com.n5nbd.mempuck.atsmini.ui.HfVfoLargeStep
+import com.n5nbd.mempuck.atsmini.ui.HfVfoSmallStep
 import com.n5nbd.mempuck.atsmini.ui.MainScreen
 import com.n5nbd.mempuck.atsmini.ui.MainViewModel
 import com.n5nbd.mempuck.atsmini.ui.ThemeChoice
+import com.n5nbd.mempuck.atsmini.ui.VhfVfoStep
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent {
             val context = LocalContext.current
             val preferences = remember {
@@ -43,6 +48,36 @@ class MainActivity : ComponentActivity() {
             var hueDegrees by remember {
                 mutableFloatStateOf(preferences.getFloat("hueDegrees", 180f))
             }
+            var vhfVfoStep by remember {
+                mutableStateOf(
+                    runCatching {
+                        VhfVfoStep.valueOf(
+                            preferences.getString("vhfVfoStep", VhfVfoStep.KHz200.name)
+                                ?: VhfVfoStep.KHz200.name,
+                        )
+                    }.getOrDefault(VhfVfoStep.KHz200),
+                )
+            }
+            var hfVfoSmallStep by remember {
+                mutableStateOf(
+                    runCatching {
+                        HfVfoSmallStep.valueOf(
+                            preferences.getString("hfVfoSmallStep", HfVfoSmallStep.KHz1.name)
+                                ?: HfVfoSmallStep.KHz1.name,
+                        )
+                    }.getOrDefault(HfVfoSmallStep.KHz1),
+                )
+            }
+            var hfVfoLargeStep by remember {
+                mutableStateOf(
+                    runCatching {
+                        HfVfoLargeStep.valueOf(
+                            preferences.getString("hfVfoLargeStep", HfVfoLargeStep.KHz10.name)
+                                ?: HfVfoLargeStep.KHz10.name,
+                        )
+                    }.getOrDefault(HfVfoLargeStep.KHz10),
+                )
+            }
             var permissionsGranted by remember {
                 mutableStateOf(hasBluetoothPermissions(context))
             }
@@ -52,20 +87,27 @@ class MainActivity : ComponentActivity() {
                 permissionsGranted = hasBluetoothPermissions(context)
             }
 
-            val lightSystemBars = themeChoice == ThemeChoice.Light
+            val lightNavigationBar = themeChoice == ThemeChoice.Light
             SideEffect {
-                val systemBarColor = if (lightSystemBars) Color.White else Color.Black
-                window.statusBarColor = systemBarColor.toArgb()
-                window.navigationBarColor = systemBarColor.toArgb()
+                window.statusBarColor = Color.Black.toArgb()
+                window.navigationBarColor = if (lightNavigationBar) {
+                    Color.White.toArgb()
+                } else {
+                    Color.Black.toArgb()
+                }
                 WindowCompat.getInsetsController(window, window.decorView).apply {
-                    isAppearanceLightStatusBars = lightSystemBars
-                    isAppearanceLightNavigationBars = lightSystemBars
+                    show(WindowInsetsCompat.Type.statusBars())
+                    isAppearanceLightStatusBars = false
+                    isAppearanceLightNavigationBars = lightNavigationBar
                 }
             }
 
             val app = application as MemPuckApplication
             val model: MainViewModel = viewModel(
-                factory = MainViewModel.factory(app.radioRepository),
+                factory = MainViewModel.factory(
+                    app.radioRepository,
+                    app.memoryRepository,
+                ),
             )
 
             MainScreen(
@@ -83,6 +125,21 @@ class MainActivity : ComponentActivity() {
                 onHueDegrees = { selected ->
                     hueDegrees = selected.coerceIn(0f, 359f)
                     preferences.edit().putFloat("hueDegrees", hueDegrees).apply()
+                },
+                vhfVfoStep = vhfVfoStep,
+                onVhfVfoStep = { selected ->
+                    vhfVfoStep = selected
+                    preferences.edit().putString("vhfVfoStep", selected.name).apply()
+                },
+                hfVfoSmallStep = hfVfoSmallStep,
+                onHfVfoSmallStep = { selected ->
+                    hfVfoSmallStep = selected
+                    preferences.edit().putString("hfVfoSmallStep", selected.name).apply()
+                },
+                hfVfoLargeStep = hfVfoLargeStep,
+                onHfVfoLargeStep = { selected ->
+                    hfVfoLargeStep = selected
+                    preferences.edit().putString("hfVfoLargeStep", selected.name).apply()
                 },
             )
         }
