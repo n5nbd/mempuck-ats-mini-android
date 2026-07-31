@@ -2,18 +2,19 @@
 
 ## Repository
 
-Current field-test branch:
+Current public field-test checkpoint:
 
 ```text
-mempuck/memory-info-src-cosmetics-v027
+Branch: main
+Tag: mempuck-ats-mini-android-v031-field-test
 ```
 
 Application identity:
 
 ```text
 Package: com.n5nbd.mempuck.atsmini
-Version: 0.27.0-dev27
-Version code: 27
+Version: 0.31.0-dev31
+Version code: 31
 Minimum Android SDK: 26
 Compile/target SDK: 36
 JVM toolchain: 17
@@ -61,9 +62,9 @@ After a successful build:
 
 ```bash
 cp app/build/outputs/apk/debug/app-debug.apk \
-  ~/Downloads/mempuck-ats-mini-android-v027-field-test.apk
+  ~/Downloads/mempuck-ats-mini-android-v031-field-test.apk
 
-sha256sum ~/Downloads/mempuck-ats-mini-android-v027-field-test.apk
+sha256sum ~/Downloads/mempuck-ats-mini-android-v031-field-test.apk
 ```
 
 ## Receiver setup
