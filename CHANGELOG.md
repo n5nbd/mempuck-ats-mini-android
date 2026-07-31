@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.27.0-dev27 — field-test checkpoint (2026-07-31)
+
+### Radio and display
+
+- Added a blank direct-entry modal in place of the always-visible frequency field.
+- Reserved a permanent black Android status bar and kept page content below it.
+- Added compact VFO and memory-specific information panels.
+- Added persistent HF small, HF large, and VHF VFO tuning-step controls.
+- Kept logical CW visible in MemPuck while translating it to ATS USB.
+- Preserved ATS-style FM display and 10 kHz tuning resolution.
+
+### Memory library
+
+- Added the authoritative local memory model and editor with frequency, mode,
+  name, tags, notes, favorite, and skip fields.
+- Added compact expanding LIST rows, tag-cloud filtering, favorite subset
+  filtering, and AND/OR tag matching.
+- Added inline favorite and skip controls.
+- Added manual MEM stepping through all matching records, including skipped
+  records.
+- Added directional MEM scanning through matching records after excluding skip.
+- Preserved active LIST filters when moving between LIST and RADIO.
+- Added memory name, filtered position/total, tags, flags, and description to the
+  RADIO information panel in MEM mode.
+
+### Frequency sources
+
+- Added a user-selected Android Files frequency directory.
+- Added JSON pack validation, import, export, deletion, refresh, and template
+  generation.
+- Added `USER.json` as the first-loaded override layer. Pack files remain
+  unchanged; user edits and deletion markers are written to `USER.json`.
+- Added uppercase canonical `#TAG` normalization.
+
+### Configuration and UI
+
+- Added one-open-at-a-time CFG accordion sections with uniform window-style
+  title bars.
+- Added RADIO LINK, DISPLAY, TUNING STEPS, and DEBUG sections.
+- Added DARK, LIGHT, and HUE presentation with persistent hue selection.
+- Added the V4 launcher icon and retained the connected wake/dim behavior.
+- Updated application metadata to version `0.27.0-dev27`, version code `27`.
+
+### Hardware status
+
+- BLE discovery, Nordic UART communication, capability detection, tuning, FM,
+  scanning, volume, memories, filters, and source-directory behavior have been
+  exercised on a Google Pixel 6 with an ATS Mini V4.
+
 ## 0.7.1-dev8
 
 - Added a dedicated V4 rising-sun launcher icon.
