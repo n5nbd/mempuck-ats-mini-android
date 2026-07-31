@@ -1,32 +1,33 @@
-# MemPuck for ATS Mini — connected display and compact config v006
+# MemPuck for ATS Mini — connect flow, FM display, and release-volume v007
 
-This checkpoint builds on the hardware-tested v005 FM scan-control baseline. It
-keeps the working radio controls unchanged and concentrates on the Pixel 6 as a
-stable dedicated controller.
+This checkpoint builds on the hardware-tested v006 connected-display/config
+baseline and keeps the working tuning, scanning, theme, and sleep behavior.
 
-## Added in v006
+## Added in v007
 
-- While the ATS Mini BLE link is ready, MemPuck keeps the Android display awake.
-- After 30 seconds without a touch, the app dims the display to 6% brightness.
-- Any touch restores the normal Android brightness and restarts the dim timer.
-- Disconnecting or closing the controller restores Android's normal brightness
-  and screen-sleep behavior.
-- The CONFIG disconnect button is now `DISCO`, keeping the control row balanced.
-- The protocol log is hidden behind a `DEBUG` toggle. When DEBUG is off, the
-  panel shrinks to the toggle alone. When enabled, it opens a 220 dp scrolling
-  log showing the latest 80 protocol lines.
-- Display choices are now `DARK`, `LIGHT`, and `HUE`.
-- DARK is white on black; LIGHT is black on white.
-- HUE reveals a slider and uses the selected hue on black throughout MemPuck.
-  Theme and hue selection are saved locally.
+- The disconnected status panel now reads `YOU'RE DISCONNECTED. TAP HERE TO
+  CONNECT.` and acts as the connection shortcut.
+- Tapping that panel opens CONFIG and immediately starts the ATS Mini BLE scan.
+  If Android BLE permission has not been granted yet, MemPuck requests it and
+  starts the scan as soon as permission is available.
+- FM frequency wheels now match the ATS Mini display and stop at the receiver's
+  real 10 kHz resolution: for example, `101.70` instead of `101.700.000`.
+- HF/AM/SSB wheels continue to display and control the full hertz value.
+- The volume control jumps to the touched position immediately, previews locally
+  while dragged, and performs one volume transaction only when the finger is
+  released.
+- The stock ATS protocol has only one-step `V`/`v` controls, so MemPuck batches
+  the required delta into immediate BLE-safe chunks instead of slowly issuing
+  timed commands. A future direct ATS volume setter could reduce that to one
+  protocol command without changing the UI.
 
-## Existing v005 behavior retained
+## Existing behavior retained
 
-- Frequency-driven low-band/FM mode selection.
-- Full FM frequency display with controls only down to the ATS Mini's real
-  10 kHz FM tuning resolution.
+- Connected screen-awake guard and inactivity dimming.
+- DARK, LIGHT, and HUE display modes.
+- Collapsible DEBUG protocol log.
 - Latched VFO scanning stopped by the next touch anywhere.
-- VFO/MEM selector and horizontal ATS volume control.
+- Frequency-driven low-band/FM mode selection.
 - Absolute `Z` tuning and live status over BLE.
 
 ## Receiver setup
@@ -39,7 +40,7 @@ Sleep mode → Unlocked (during development)
 The patched firmware should answer:
 
 ```text
-Z?\r  →  OK,Z,1
+Z?  →  OK,Z,1
 ```
 
 ## Build and install

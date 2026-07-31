@@ -138,6 +138,17 @@ class AtsAdHocProtocol {
         fun absoluteTuneCommand(frequencyHz: Long, mode: RadioMode): String =
             "Z$frequencyHz,${mode.atsMode}\r"
 
+        fun volumeDeltaCommand(currentVolume: Int, targetVolume: Int): String {
+            val current = currentVolume.coerceIn(0, 63)
+            val target = targetVolume.coerceIn(0, 63)
+            val delta = target - current
+            return when {
+                delta > 0 -> VOLUME_UP_COMMAND.repeat(delta)
+                delta < 0 -> VOLUME_DOWN_COMMAND.repeat(-delta)
+                else -> ""
+            }
+        }
+
         private const val STATUS_FIELD_COUNT = 15
         private val CAPABILITY = Regex("OK,Z,(\\d+)")
         private val TUNE_CONFIRMATION = Regex("OK,Z,(\\d+),(FM|AM|LSB|USB)")

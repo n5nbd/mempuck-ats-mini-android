@@ -1,5 +1,20 @@
 # Changelog
 
+## v007 — connect shortcut, compact FM display, and release-volume
+
+- Turned the disconnected RADIO status panel into a connection shortcut that
+  opens CONFIG and starts BLE discovery.
+- Added permission-aware deferred scanning so the same shortcut continues after
+  Android grants BLE access.
+- Changed the FM frequency wheels to the ATS Mini-style 10 kHz display, such as
+  `101.70`, instead of showing four meaningless trailing zero digits.
+- Kept all low-band hertz digits and controls unchanged.
+- Replaced the Material volume slider interaction with an immediate touch/drag
+  control that previews locally and commits only when the finger is released.
+- Replaced the old timed volume stepping with one immediate release transaction,
+  batched into BLE-safe chunks because current ATS firmware exposes only `V` and
+  `v` one-step volume commands.
+
 ## v006 — connected display and compact configuration
 
 - Kept the Pixel display awake while the ATS Mini BLE link is ready so Android

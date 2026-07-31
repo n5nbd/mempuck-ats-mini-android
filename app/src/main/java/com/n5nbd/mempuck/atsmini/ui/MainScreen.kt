@@ -5,9 +5,11 @@ import android.content.Context
 import android.content.ContextWrapper
 import android.view.WindowManager
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
@@ -42,7 +44,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -138,6 +142,7 @@ fun MainScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableStateOf(AppTab.Radio) }
     var interactionSequence by remember { mutableStateOf(0L) }
+    var scanAfterPermission by rememberSaveable { mutableStateOf(false) }
     val colors = colorsFor(themeChoice, hueDegrees)
     val keepControllerAwake = state.link is LinkState.Ready
 
@@ -145,6 +150,13 @@ fun MainScreen(
         connected = keepControllerAwake,
         interactionSequence = interactionSequence,
     )
+
+    LaunchedEffect(permissionsGranted, scanAfterPermission) {
+        if (permissionsGranted && scanAfterPermission) {
+            scanAfterPermission = false
+            viewModel.startScan()
+        }
+    }
 
     MaterialTheme {
         Surface(
@@ -191,6 +203,15 @@ fun MainScreen(
                         startVfoScan = viewModel::startVfoScan,
                         stopVfoScan = viewModel::stopVfoScan,
                         setVolume = viewModel::setVolume,
+                        openConfigAndScan = {
+                            tab = AppTab.Config
+                            if (permissionsGranted) {
+                                viewModel.startScan()
+                            } else {
+                                scanAfterPermission = true
+                                requestPermissions()
+                            }
+                        },
                     )
                     AppTab.List -> PlaceholderScreen(
                         title = "LIST",
@@ -292,6 +313,7 @@ private fun RadioScreen(
     startVfoScan: (Long) -> Unit,
     stopVfoScan: () -> Unit,
     setVolume: (Int) -> Unit,
+    openConfigAndScan: () -> Unit,
 ) {
     var memoryMode by rememberSaveable { mutableStateOf(false) }
     val vfoEnabled = !memoryMode && canTune(state)
@@ -361,7 +383,11 @@ private fun RadioScreen(
             Spacer(Modifier.height(10.dp))
         }
 
-        StatusBlock(state, colors)
+        StatusBlock(
+            state = state,
+            colors = colors,
+            onDisconnectedClick = openConfigAndScan,
+        )
 
         Spacer(Modifier.height(10.dp))
 
@@ -434,20 +460,18 @@ private fun FrequencyDigits(
     onChange: (Long) -> Unit,
     onScanStart: (Long) -> Unit,
 ) {
-    val digits = frequencyDigits(frequencyHz)
-    val fmMode = AtsFrequencyPlan.regionFor(frequencyHz) == AtsFrequencyRegion.BroadcastFm
+    val wheel = frequencyWheelSpec(frequencyHz)
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        digits.forEachIndexed { index, digit ->
-            val place = POWERS_OF_TEN[digits.length - index - 1]
-            val showArrows = !fmMode || place >= AtsFrequencyPlan.FM_TUNING_RESOLUTION_HZ
+        wheel.digits.forEachIndexed { index, digit ->
+            val place = wheel.placesHz[index]
             DigitControl(
                 digit = digit,
                 enabled = enabled,
-                showArrows = showArrows,
+                showArrows = true,
                 colors = colors,
                 onUp = {
                     onChange(
@@ -469,8 +493,7 @@ private fun FrequencyDigits(
                 onScanDown = { onScanStart(-place) },
                 modifier = Modifier.weight(1f),
             )
-            val digitsRemaining = digits.length - index - 1
-            if (digitsRemaining > 0 && digitsRemaining % 3 == 0) {
+            if (index in wheel.separatorAfter) {
                 Text(
                     text = ".",
                     modifier = Modifier.width(13.dp),
@@ -661,28 +684,76 @@ private fun VolumeControl(
             fontWeight = FontWeight.Black,
             fontSize = 15.sp,
         )
-        Slider(
-            value = sliderValue,
-            onValueChange = {
-                dragging = true
-                sliderValue = it
-            },
-            onValueChangeFinished = {
-                dragging = false
-                onVolumeSelected(sliderValue.roundToInt())
-            },
-            enabled = enabled,
-            valueRange = 0f..63f,
-            colors = SliderDefaults.colors(
-                thumbColor = colors.foreground,
-                activeTrackColor = colors.foreground,
-                inactiveTrackColor = colors.muted,
-                disabledThumbColor = colors.muted,
-                disabledActiveTrackColor = colors.muted,
-                disabledInactiveTrackColor = colors.muted.copy(alpha = 0.45f),
-            ),
-            modifier = Modifier.weight(1f),
-        )
+        Canvas(
+            modifier = Modifier
+                .weight(1f)
+                .height(42.dp)
+                .pointerInput(enabled) {
+                    if (!enabled) return@pointerInput
+                    awaitEachGesture {
+                        val down = awaitFirstDown(requireUnconsumed = false)
+                        val pointerId = down.id
+                        val edge = 10.dp.toPx()
+                        val usableWidth = (size.width - edge * 2f).coerceAtLeast(1f)
+                        var pendingVolume = sliderValue.roundToInt().coerceIn(0, 63)
+
+                        fun updateFromX(x: Float) {
+                            val fraction = ((x - edge) / usableWidth).coerceIn(0f, 1f)
+                            pendingVolume = (fraction * 63f).roundToInt().coerceIn(0, 63)
+                            dragging = true
+                            sliderValue = pendingVolume.toFloat()
+                        }
+
+                        updateFromX(down.position.x)
+                        down.consume()
+
+                        var released = false
+                        while (true) {
+                            val event = awaitPointerEvent()
+                            val change = event.changes.firstOrNull { it.id == pointerId } ?: break
+                            updateFromX(change.position.x)
+                            change.consume()
+                            if (!change.pressed) {
+                                released = true
+                                break
+                            }
+                        }
+
+                        dragging = false
+                        if (released) {
+                            onVolumeSelected(pendingVolume)
+                        }
+                    }
+                },
+        ) {
+            val edge = 10.dp.toPx()
+            val centerY = size.height / 2f
+            val startX = edge
+            val endX = (size.width - edge).coerceAtLeast(startX)
+            val fraction = (sliderValue / 63f).coerceIn(0f, 1f)
+            val thumbX = startX + ((endX - startX) * fraction)
+            val trackWidth = 4.dp.toPx()
+
+            drawLine(
+                color = colors.muted,
+                start = Offset(startX, centerY),
+                end = Offset(endX, centerY),
+                strokeWidth = trackWidth,
+                cap = StrokeCap.Round,
+            )
+            drawLine(
+                color = colors.foreground,
+                start = Offset(startX, centerY),
+                end = Offset(thumbX, centerY),
+                strokeWidth = trackWidth,
+                cap = StrokeCap.Round,
+            )
+            drawCircle(
+                color = colors.foreground,
+                radius = 9.dp.toPx(),
+                center = Offset(thumbX, centerY),
+            )
+        }
         Text(
             text = sliderValue.roundToInt().toString().padStart(2, '0'),
             fontFamily = FontFamily.Monospace,
@@ -693,11 +764,17 @@ private fun VolumeControl(
 }
 
 @Composable
-private fun StatusBlock(state: RadioSnapshot, colors: PuckColors) {
+private fun StatusBlock(
+    state: RadioSnapshot,
+    colors: PuckColors,
+    onDisconnectedClick: () -> Unit,
+) {
+    val disconnected = state.link is LinkState.Disconnected
     Column(
         modifier = Modifier
             .fillMaxWidth()
             .border(2.dp, colors.foreground, PanelShape)
+            .clickable(enabled = disconnected, onClick = onDisconnectedClick)
             .padding(12.dp),
         verticalArrangement = Arrangement.spacedBy(5.dp),
     ) {
@@ -1063,7 +1140,7 @@ private fun primaryStatusLine(state: RadioSnapshot): String = when (val tune = s
     TuneState.Idle -> state.status?.let {
         "${it.bandName} • ${formatFrequencyHz(it.frequencyHz)} ${state.selectedMode.label}"
     } ?: when (state.link) {
-        LinkState.Disconnected -> "DISCONNECTED — OPEN CONFIG"
+        LinkState.Disconnected -> "YOU'RE DISCONNECTED. TAP HERE TO CONNECT."
         LinkState.Connecting -> "CONNECTING TO ATS MINI"
         is LinkState.Ready -> "ATS MINI READY"
         is LinkState.Failed -> "CONNECTION ERROR"
@@ -1079,15 +1156,48 @@ private fun secondaryStatusLine(state: RadioSnapshot): String {
         is CapabilityState.Supported -> "Absolute tuning supported • Z protocol v${capability.version}"
         is CapabilityState.Unsupported -> capability.detail
         CapabilityState.Checking -> "Checking patched-firmware capability"
-        CapabilityState.NotChecked -> "Connect in CONFIG to begin"
+        CapabilityState.NotChecked -> if (state.link is LinkState.Disconnected) {
+            "OPENS CONFIG AND STARTS THE ATS MINI SCAN"
+        } else {
+            "Connect in CONFIG to begin"
+        }
     }
 }
 
 private fun canTune(state: RadioSnapshot): Boolean =
     state.link is LinkState.Ready && state.capability is CapabilityState.Supported
 
-private fun frequencyDigits(frequencyHz: Long): String =
-    frequencyHz.toString().padStart(if (frequencyHz >= 100_000_000L) 9 else 8, '0')
+internal data class FrequencyWheelSpec(
+    val digits: String,
+    val placesHz: List<Long>,
+    val separatorAfter: Set<Int>,
+)
+
+internal fun frequencyWheelSpec(frequencyHz: Long): FrequencyWheelSpec {
+    if (AtsFrequencyPlan.regionFor(frequencyHz) == AtsFrequencyRegion.BroadcastFm) {
+        val digits = (frequencyHz / AtsFrequencyPlan.FM_TUNING_RESOLUTION_HZ).toString()
+        val places = digits.indices.map { index ->
+            POWERS_OF_TEN[digits.length - index - 1] * AtsFrequencyPlan.FM_TUNING_RESOLUTION_HZ
+        }
+        return FrequencyWheelSpec(
+            digits = digits,
+            placesHz = places,
+            separatorAfter = setOf(digits.length - 3),
+        )
+    }
+
+    val digits = frequencyHz.toString().padStart(if (frequencyHz >= 100_000_000L) 9 else 8, '0')
+    val places = digits.indices.map { index -> POWERS_OF_TEN[digits.length - index - 1] }
+    val separators = digits.indices.filterTo(mutableSetOf()) { index ->
+        val digitsRemaining = digits.length - index - 1
+        digitsRemaining > 0 && digitsRemaining % 3 == 0
+    }
+    return FrequencyWheelSpec(
+        digits = digits,
+        placesHz = places,
+        separatorAfter = separators,
+    )
+}
 
 private fun tuneOffset(
     state: RadioSnapshot,

@@ -27,8 +27,6 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
     private var statusSeenSinceReady = false
     private var pendingLogicalMode: RadioMode? = null
     private var vfoScanStepHz: Long? = null
-    private var volumeTarget: Int? = null
-    private var volumeWorkingValue: Int = 0
 
     private val capabilityTimeout = Runnable {
         if (_state.value.capability == CapabilityState.Checking) {
@@ -81,38 +79,6 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         }
     }
 
-    private val volumeAdjustRunnable = object : Runnable {
-        override fun run() {
-            val target = volumeTarget ?: return
-            if (_state.value.link !is LinkState.Ready) {
-                stopVolumeAdjustment("Volume adjustment stopped: ATS Mini is not ready")
-                return
-            }
-            if (volumeWorkingValue == target) {
-                volumeTarget = null
-                appendLog("VOLUME  $target")
-                return
-            }
-
-            val command = if (target > volumeWorkingValue) {
-                AtsAdHocProtocol.VOLUME_UP_COMMAND
-            } else {
-                AtsAdHocProtocol.VOLUME_DOWN_COMMAND
-            }
-            if (!client.write(command.toByteArray(Charsets.US_ASCII))) {
-                stopVolumeAdjustment("BLE volume write did not start")
-                return
-            }
-
-            volumeWorkingValue += if (target > volumeWorkingValue) 1 else -1
-            val current = _state.value
-            val status = current.status
-            if (status != null) {
-                _state.value = current.copy(status = status.copy(volume = volumeWorkingValue))
-            }
-            mainHandler.postDelayed(this, VOLUME_STEP_INTERVAL_MS)
-        }
-    }
 
     private val _state = MutableStateFlow(RadioSnapshot())
     val state: StateFlow<RadioSnapshot> = _state.asStateFlow()
@@ -132,7 +98,6 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         statusSeenSinceReady = false
         pendingLogicalMode = null
         stopVfoScanInternal(null)
-        stopVolumeAdjustment(null)
         _state.value = _state.value.copy(
             capability = CapabilityState.NotChecked,
             statusStream = StatusStreamState.Waiting,
@@ -210,20 +175,27 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
     }
 
     fun setVolume(volume: Int) {
-        val status = _state.value.status
-        if (_state.value.link !is LinkState.Ready || status == null) {
+        val currentState = _state.value
+        val status = currentState.status
+        if (currentState.link !is LinkState.Ready || status == null) {
             appendLog("VOLUME ERROR  Live ATS status is unavailable")
             return
         }
+
         val target = volume.coerceIn(MIN_VOLUME, MAX_VOLUME)
-        mainHandler.removeCallbacks(volumeAdjustRunnable)
-        volumeTarget = target
-        volumeWorkingValue = status.volume.coerceIn(MIN_VOLUME, MAX_VOLUME)
-        if (volumeWorkingValue == target) {
-            volumeTarget = null
-            return
+        val command = AtsAdHocProtocol.volumeDeltaCommand(status.volume, target)
+        if (command.isEmpty()) return
+
+        val chunks = command.chunked(BLE_SAFE_WRITE_BYTES)
+        for (chunk in chunks) {
+            if (!client.write(chunk.toByteArray(Charsets.US_ASCII))) {
+                appendLog("VOLUME ERROR  BLE volume transaction did not start")
+                return
+            }
         }
-        volumeAdjustRunnable.run()
+
+        _state.value = currentState.copy(status = status.copy(volume = target))
+        appendLog("VOLUME  ${status.volume} -> $target (${chunks.size} BLE write${if (chunks.size == 1) "" else "s"})")
     }
 
     private fun tuneResolved(frequencyHz: Long, logicalMode: RadioMode) {
@@ -303,7 +275,6 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         statusSeenSinceReady = false
         pendingLogicalMode = null
         stopVfoScanInternal(null)
-        stopVolumeAdjustment(null)
         _state.value = _state.value.copy(
             link = LinkState.Disconnected,
             capability = CapabilityState.NotChecked,
@@ -354,13 +325,8 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
                         keepLogicalCw -> RadioMode.CW
                         else -> event.value.mode
                     }
-                    val displayedStatus = if (volumeTarget != null) {
-                        event.value.copy(volume = volumeWorkingValue)
-                    } else {
-                        event.value
-                    }
                     _state.value = current.copy(
-                        status = displayedStatus,
+                        status = event.value,
                         statusStream = StatusStreamState.Active,
                         targetFrequencyHz = if (sending) current.targetFrequencyHz else event.value.frequencyHz,
                         selectedMode = reportedLogicalMode,
@@ -392,7 +358,6 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
     override fun onError(message: String) {
         cancelTimers()
         stopVfoScanInternal(null)
-        stopVolumeAdjustment(null)
         _state.value = _state.value.copy(link = LinkState.Failed(message))
         appendLog("ERROR  $message")
     }
@@ -415,19 +380,12 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         if (wasScanning && logMessage != null) appendLog(logMessage)
     }
 
-    private fun stopVolumeAdjustment(logMessage: String?) {
-        mainHandler.removeCallbacks(volumeAdjustRunnable)
-        val wasAdjusting = volumeTarget != null
-        volumeTarget = null
-        if (wasAdjusting && logMessage != null) appendLog("VOLUME ERROR  $logMessage")
-    }
 
     private fun cancelTimers() {
         mainHandler.removeCallbacks(capabilityTimeout)
         mainHandler.removeCallbacks(tuneTimeout)
         mainHandler.removeCallbacks(monitorCheck)
         mainHandler.removeCallbacks(vfoScanRunnable)
-        mainHandler.removeCallbacks(volumeAdjustRunnable)
     }
 
     private fun appendLog(message: String) {
@@ -441,7 +399,7 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         const val TUNE_TIMEOUT_MS = 3_000L
         const val MONITOR_PRESENCE_WINDOW_MS = 1_200L
         const val SCAN_DWELL_MS = 1_500L
-        const val VOLUME_STEP_INTERVAL_MS = 55L
+        const val BLE_SAFE_WRITE_BYTES = 20
         const val MIN_VOLUME = 0
         const val MAX_VOLUME = 63
     }

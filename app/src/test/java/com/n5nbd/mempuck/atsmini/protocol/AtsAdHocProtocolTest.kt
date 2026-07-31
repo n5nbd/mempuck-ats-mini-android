@@ -58,6 +58,13 @@ class AtsAdHocProtocolTest {
     }
 
     @Test
+    fun volumeDeltaIsBuiltAsOneReleaseTransaction() {
+        assertEquals("VVVV", AtsAdHocProtocol.volumeDeltaCommand(20, 24))
+        assertEquals("vvv", AtsAdHocProtocol.volumeDeltaCommand(20, 17))
+        assertEquals("", AtsAdHocProtocol.volumeDeltaCommand(20, 20))
+    }
+
+    @Test
     fun cwTuneCommandMapsToUsb() {
         assertEquals("Z7030000,USB\r", AtsAdHocProtocol.absoluteTuneCommand(7_030_000L, RadioMode.CW))
     }
