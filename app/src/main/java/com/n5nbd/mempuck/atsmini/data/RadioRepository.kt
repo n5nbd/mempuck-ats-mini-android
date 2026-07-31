@@ -12,6 +12,7 @@ import com.n5nbd.mempuck.atsmini.model.LinkState
 import com.n5nbd.mempuck.atsmini.model.RadioMode
 import com.n5nbd.mempuck.atsmini.model.RadioSnapshot
 import com.n5nbd.mempuck.atsmini.model.StatusStreamState
+import com.n5nbd.mempuck.atsmini.model.StartupReconnectStage
 import com.n5nbd.mempuck.atsmini.model.TuneState
 import com.n5nbd.mempuck.atsmini.protocol.AtsAdHocProtocol
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -20,13 +21,23 @@ import kotlinx.coroutines.flow.asStateFlow
 
 /** Coordinates BLE transport events with ATS protocol semantics. */
 class RadioRepository(context: Context) : AtsBleClient.Listener {
+    private val appContext = context.applicationContext
+    private val preferences = appContext.getSharedPreferences(
+        RADIO_PREFERENCES,
+        Context.MODE_PRIVATE,
+    )
     private val protocol = AtsAdHocProtocol()
-    private val client = AtsBleClient(context, this)
+    private val client = AtsBleClient(appContext, this)
     private val devicesByAddress = linkedMapOf<String, AtsDevice>()
     private val mainHandler = Handler(Looper.getMainLooper())
     private var statusSeenSinceReady = false
     private var pendingLogicalMode: RadioMode? = null
     private var vfoScanStepHz: Long? = null
+    private var startupAttempted = false
+    private var startupTargetAddress: String? = null
+    private var startupConnectingAddress: String? = null
+    private var startupFlowActive = false
+    private var scanDwellMs = DEFAULT_SCAN_DWELL_MS
 
     private val capabilityTimeout = Runnable {
         if (_state.value.capability == CapabilityState.Checking) {
@@ -34,6 +45,9 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
                 capability = CapabilityState.Unsupported("No Z? response within 3 seconds"),
             )
             appendLog("Z? timed out")
+            if (startupConnectingAddress != null) {
+                fallBackToReceiverScan("Saved ATS Mini did not answer the MemPuck capability probe")
+            }
         }
     }
 
@@ -74,7 +88,7 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
             }
 
             if (vfoScanStepHz != null) {
-                mainHandler.postDelayed(this, SCAN_DWELL_MS)
+                mainHandler.postDelayed(this, scanDwellMs)
             }
         }
     }
@@ -83,33 +97,110 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
     private val _state = MutableStateFlow(RadioSnapshot())
     val state: StateFlow<RadioSnapshot> = _state.asStateFlow()
 
-    fun startScan() {
+    fun startAutoConnect() {
+        if (startupAttempted) return
+        startupAttempted = true
+
+        val savedAddress = preferences.getString(LAST_VERIFIED_RADIO_ADDRESS, null)
+        if (savedAddress.isNullOrBlank()) {
+            appendLog("No saved ATS Mini; starting receiver scan")
+            startFullScan()
+            return
+        }
+
         devicesByAddress.clear()
-        _state.value = _state.value.copy(devices = emptyList(), capability = CapabilityState.NotChecked)
+        startupFlowActive = true
+        startupTargetAddress = savedAddress
+        startupConnectingAddress = null
+        _state.value = _state.value.copy(
+            devices = emptyList(),
+            capability = CapabilityState.NotChecked,
+            startupReconnectStage = StartupReconnectStage.Looking,
+        )
+        appendLog("Looking for saved ATS Mini $savedAddress")
+        client.startScan(
+            targetAddress = savedAddress,
+            windowMs = SAVED_RADIO_SCAN_WINDOW_MS,
+        )
+    }
+
+    fun startScan() {
+        cancelStartupFlow()
+        startFullScan()
+    }
+
+    fun stopScan() {
+        cancelStartupFlow()
+        client.stopScan()
+    }
+
+    fun connect(device: AtsDevice) {
+        cancelStartupFlow()
+        connectInternal(device, startupConnection = false)
+    }
+
+    fun disconnect() {
+        cancelStartupFlow()
+        client.stopScan()
+        appendLog("Disconnect requested")
+        client.disconnect()
+    }
+
+    private fun startFullScan() {
+        devicesByAddress.clear()
+        _state.value = _state.value.copy(
+            devices = emptyList(),
+            capability = CapabilityState.NotChecked,
+            startupReconnectStage = StartupReconnectStage.Idle,
+        )
         appendLog("Scanning for ATS Mini Ad hoc / Nordic UART devices")
         client.startScan()
     }
 
-    fun stopScan() = client.stopScan()
-
-    fun connect(device: AtsDevice) {
+    private fun connectInternal(device: AtsDevice, startupConnection: Boolean) {
         protocol.reset()
         cancelTimers()
         statusSeenSinceReady = false
         pendingLogicalMode = null
         stopVfoScanInternal(null)
+        startupConnectingAddress = if (startupConnection) device.address else null
         _state.value = _state.value.copy(
             capability = CapabilityState.NotChecked,
             statusStream = StatusStreamState.Waiting,
             tuneState = TuneState.Idle,
+            startupReconnectStage = if (startupConnection) {
+                StartupReconnectStage.Connecting
+            } else {
+                StartupReconnectStage.Idle
+            },
         )
         appendLog("Connecting to ${device.name ?: device.address}")
         client.connect(device)
     }
 
-    fun disconnect() {
-        appendLog("Disconnect requested")
-        client.disconnect()
+    private fun cancelStartupFlow() {
+        startupFlowActive = false
+        startupTargetAddress = null
+        startupConnectingAddress = null
+        if (_state.value.startupReconnectStage != StartupReconnectStage.Idle) {
+            _state.value = _state.value.copy(
+                startupReconnectStage = StartupReconnectStage.Idle,
+            )
+        }
+    }
+
+    private fun fallBackToReceiverScan(message: String) {
+        if (!startupFlowActive) return
+        val disconnectCurrent = startupConnectingAddress != null
+        appendLog("$message; scanning for another receiver")
+        startupFlowActive = false
+        startupTargetAddress = null
+        startupConnectingAddress = null
+        _state.value = _state.value.copy(
+            startupReconnectStage = StartupReconnectStage.Idle,
+        )
+        if (disconnectCurrent) client.disconnect()
+        startFullScan()
     }
 
     fun probeCapability() {
@@ -161,6 +252,10 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         tuneResolved(_state.value.targetFrequencyHz, logicalMode)
     }
 
+    fun setScanDwellMs(value: Long) {
+        scanDwellMs = value.coerceIn(MIN_SCAN_DWELL_MS, MAX_SCAN_DWELL_MS)
+    }
+
     fun startVfoScan(stepHz: Long) {
         if (stepHz == 0L) return
         val current = _state.value
@@ -171,7 +266,7 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         mainHandler.removeCallbacks(vfoScanRunnable)
         vfoScanStepHz = stepHz
         _state.value = current.copy(vfoScanning = true)
-        appendLog("VFO SCAN  ${if (stepHz > 0) "+" else ""}$stepHz Hz / ${SCAN_DWELL_MS} ms")
+        appendLog("VFO SCAN  ${if (stepHz > 0) "+" else ""}$stepHz Hz / $scanDwellMs ms")
         vfoScanRunnable.run()
     }
 
@@ -248,6 +343,10 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
     override fun onScanState(scanning: Boolean) {
         _state.value = _state.value.copy(scanning = scanning)
         appendLog(if (scanning) "BLE scan started" else "BLE scan stopped")
+
+        if (!scanning && startupFlowActive && startupTargetAddress != null) {
+            fallBackToReceiverScan("Saved ATS Mini was not found")
+        }
     }
 
     override fun onDevice(device: AtsDevice) {
@@ -255,6 +354,15 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         _state.value = _state.value.copy(
             devices = devicesByAddress.values.sortedByDescending(AtsDevice::rssi),
         )
+
+        val targetAddress = startupTargetAddress
+        if (startupFlowActive && targetAddress != null &&
+            device.address.equals(targetAddress, ignoreCase = true)
+        ) {
+            startupTargetAddress = null
+            appendLog("Saved ATS Mini found")
+            connectInternal(device, startupConnection = true)
+        }
     }
 
     override fun onConnecting(device: AtsDevice) {
@@ -266,6 +374,11 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         _state.value = _state.value.copy(
             link = LinkState.Ready(device),
             statusStream = StatusStreamState.Waiting,
+            startupReconnectStage = if (startupConnectingAddress != null) {
+                StartupReconnectStage.Verifying
+            } else {
+                StartupReconnectStage.Idle
+            },
         )
         appendLog("BLE UART ready: ${device.name ?: device.address}")
         probeCapability()
@@ -285,6 +398,7 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
             capability = CapabilityState.NotChecked,
             statusStream = StatusStreamState.Waiting,
             tuneState = TuneState.Idle,
+            startupReconnectStage = StartupReconnectStage.Idle,
         )
         appendLog("BLE disconnected")
     }
@@ -300,6 +414,14 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
                     _state.value = _state.value.copy(
                         capability = CapabilityState.Supported(event.version),
                     )
+                    val readyDevice = (_state.value.link as? LinkState.Ready)?.device
+                    if (readyDevice != null) {
+                        preferences.edit()
+                            .putString(LAST_VERIFIED_RADIO_ADDRESS, readyDevice.address)
+                            .apply()
+                        appendLog("Remembered ATS Mini ${readyDevice.address}")
+                    }
+                    cancelStartupFlow()
                 }
 
                 is AtsAdHocProtocol.Event.AbsoluteTuneConfirmed -> {
@@ -349,6 +471,9 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
                         _state.value = _state.value.copy(
                             capability = CapabilityState.Unsupported(event.message),
                         )
+                        if (startupConnectingAddress != null) {
+                            fallBackToReceiverScan("Saved ATS Mini does not support MemPuck")
+                        }
                     }
                     if (_state.value.tuneState is TuneState.Sending) {
                         mainHandler.removeCallbacks(tuneTimeout)
@@ -363,6 +488,15 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
     override fun onError(message: String) {
         cancelTimers()
         stopVfoScanInternal(null)
+        if (startupFlowActive && startupConnectingAddress != null) {
+            fallBackToReceiverScan("Saved ATS Mini connection failed")
+            return
+        }
+        if (_state.value.scanning) {
+            appendLog("AUTO-CONNECT  $message; fallback scan is active")
+            return
+        }
+        cancelStartupFlow()
         _state.value = _state.value.copy(link = LinkState.Failed(message))
         appendLog("ERROR  $message")
     }
@@ -400,10 +534,15 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
 
     private companion object {
         const val MAX_LOG_LINES = 200
+        const val RADIO_PREFERENCES = "mempuck-radio"
+        const val LAST_VERIFIED_RADIO_ADDRESS = "lastVerifiedRadioAddress"
+        const val SAVED_RADIO_SCAN_WINDOW_MS = 5_000L
         const val CAPABILITY_TIMEOUT_MS = 3_000L
         const val TUNE_TIMEOUT_MS = 3_000L
         const val MONITOR_PRESENCE_WINDOW_MS = 1_200L
-        const val SCAN_DWELL_MS = 1_500L
+        const val DEFAULT_SCAN_DWELL_MS = 2_000L
+        const val MIN_SCAN_DWELL_MS = 1_000L
+        const val MAX_SCAN_DWELL_MS = 10_000L
         const val BLE_SAFE_WRITE_BYTES = 20
         const val MIN_VOLUME = 0
         const val MAX_VOLUME = 63

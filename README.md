@@ -2,11 +2,13 @@
 
 MemPuck for ATS Mini is a BLE controller and authoritative VFO/memory system for the ATS Mini receiver. It keeps the working MemPuck interface and adds a local, tagged frequency library without making ATS numbered memories part of the normal workflow.
 
-This repository currently contains the **v0.27.0-dev27 field-test checkpoint**.
+This repository currently contains the **v0.31.0-dev31 scan-dwell and CFG cosmetics checkpoint**.
 
 ## What it does
 
 - Discovers and connects to an ATS Mini in Bluetooth LE Ad hoc mode.
+- Remembers the last capability-verified receiver and attempts to reconnect to it on a fresh app launch.
+- Shows a MemPuck splash/about screen while the saved receiver is located, connected, and capability-verified.
 - Detects the patched receiver through the `Z?` capability query.
 - Tunes the receiver with absolute frequency and mode commands.
 - Provides direct frequency entry, digit controls, VFO stepping, scanning, and volume control.
@@ -61,7 +63,7 @@ The portrait interface follows the established MemPuck design rather than a gene
 - `RADIO` — live receiver control, VFO/MEM operation, direct entry, scanning, and volume
 - `LIST` — filtered local memory library and editor access
 - `SRC` — frequency-directory, pack, template, import, export, and delete tools
-- `CFG` — radio link, display theme, tuning steps, and debug log
+- `CFG` — radio link, display theme, tuning steps, shared scan dwell, debug log, and about information
 
 Themes:
 
@@ -71,6 +73,8 @@ Themes:
 
 The status bar remains black on every page. While connected, the app keeps the display session alive, dims after inactivity, restores brightness on touch, and restores normal Android sleep behavior after disconnect.
 
+The VFO and memory scanners share one persistent dwell setting with 1, 2, 5, and 10 second choices; 2 seconds is the default.
+
 ## Memory behavior
 
 MemPuck allows one active record per normalized frequency.
@@ -78,6 +82,7 @@ MemPuck allows one active record per normalized frequency.
 - A single tap expands or collapses a LIST row.
 - A double tap loads that record on the RADIO page in MEM mode.
 - Expanded rows allow immediate `FAV` and `SKIP` changes or open the full editor.
+- The editor uses the same `FAV` and `SKIP` labels as the LIST page and requires confirmation before deleting a memory.
 - `FAV` narrows the result produced by the selected tags and AND/OR operation.
 - `SKIP` does not hide a memory and does not prevent manual stepping; it is consulted only by memory scanning.
 - MEM single arrows step through every memory in the active filtered result.

@@ -23,6 +23,7 @@ import com.n5nbd.mempuck.atsmini.ui.HfVfoLargeStep
 import com.n5nbd.mempuck.atsmini.ui.HfVfoSmallStep
 import com.n5nbd.mempuck.atsmini.ui.MainScreen
 import com.n5nbd.mempuck.atsmini.ui.MainViewModel
+import com.n5nbd.mempuck.atsmini.ui.ScanDwell
 import com.n5nbd.mempuck.atsmini.ui.ThemeChoice
 import com.n5nbd.mempuck.atsmini.ui.VhfVfoStep
 
@@ -76,6 +77,16 @@ class MainActivity : ComponentActivity() {
                                 ?: HfVfoLargeStep.KHz10.name,
                         )
                     }.getOrDefault(HfVfoLargeStep.KHz10),
+                )
+            }
+            var scanDwell by remember {
+                mutableStateOf(
+                    runCatching {
+                        ScanDwell.valueOf(
+                            preferences.getString("scanDwell", ScanDwell.Seconds2.name)
+                                ?: ScanDwell.Seconds2.name,
+                        )
+                    }.getOrDefault(ScanDwell.Seconds2),
                 )
             }
             var permissionsGranted by remember {
@@ -140,6 +151,11 @@ class MainActivity : ComponentActivity() {
                 onHfVfoLargeStep = { selected ->
                     hfVfoLargeStep = selected
                     preferences.edit().putString("hfVfoLargeStep", selected.name).apply()
+                },
+                scanDwell = scanDwell,
+                onScanDwell = { selected ->
+                    scanDwell = selected
+                    preferences.edit().putString("scanDwell", selected.name).apply()
                 },
             )
         }

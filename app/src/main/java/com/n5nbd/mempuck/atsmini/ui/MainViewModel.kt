@@ -31,6 +31,7 @@ class MainViewModel(
 
     private var memoryScanJob: Job? = null
     private var memoryScanGeneration = 0L
+    private var scanDwellMs = DEFAULT_SCAN_DWELL_MS
     private val _memoryScanDirection = MutableStateFlow(0)
     val memoryScanDirection = _memoryScanDirection.asStateFlow()
 
@@ -40,6 +41,7 @@ class MainViewModel(
         }
     }
 
+    fun startAutoConnect() = repository.startAutoConnect()
     fun startScan() = repository.startScan()
     fun stopScan() = repository.stopScan()
     fun connect(device: AtsDevice) = repository.connect(device)
@@ -56,6 +58,11 @@ class MainViewModel(
     }
 
     fun selectLowBandMode(mode: RadioMode) = repository.selectLowBandMode(mode)
+
+    fun setScanDwellMs(value: Long) {
+        scanDwellMs = value
+        repository.setScanDwellMs(value)
+    }
 
     fun startVfoScan(stepHz: Long) {
         stopMemoryScan()
@@ -111,7 +118,7 @@ class MainViewModel(
                             lastSingleEntryId = target.id
                         }
                     }
-                    delay(MEMORY_SCAN_DWELL_MS)
+                    delay(scanDwellMs)
                 }
             } finally {
                 if (memoryScanGeneration == generation) {
@@ -200,7 +207,7 @@ class MainViewModel(
     }
 
     companion object {
-        private const val MEMORY_SCAN_DWELL_MS = 1_500L
+        private const val DEFAULT_SCAN_DWELL_MS = 2_000L
 
         fun factory(
             repository: RadioRepository,

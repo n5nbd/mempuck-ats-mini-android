@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.31.0-dev31 — practical scan dwell and CFG cosmetics (2026-07-31)
+
+- Replaced the scan dwell choices with 1, 2, 5, and 10 seconds.
+- Made 2 seconds the default and migration fallback for removed dwell choices.
+- Moved the seconds unit into `VFO AND MEMORY DWELL (SECONDS)` and kept all
+  four dwell controls on one row.
+- Tightened the spacing between CFG accordion windows from 2.5 dp to 1 dp.
+- Expanded the ABOUT credit into separate `Mark Zimmerman, N5NBD` and
+  `Polyform Noncommercial Licence` lines.
+- Updated application metadata to version `0.31.0-dev31`, version code `31`.
+
+## 0.30.0-dev30 — scan dwell, compact CFG, and reconnect splash (2026-07-31)
+
+- Added a persistent shared scan-dwell setting for both VFO and memory scans,
+  with 0.5, 1, 1.5, 2, and 3 second choices.
+- Added a dedicated `SCAN` accordion section to CFG.
+- Reduced the vertical gap between collapsed CFG windows by approximately 75%.
+- Added an `ABOUT` accordion section with a theme-aware MemPuck silhouette,
+  application version, product description, callsign, and license summary.
+- Reused the ABOUT presentation as a startup screen while the app looks for,
+  connects to, and verifies the remembered ATS Mini.
+- Updated application metadata to version `0.30.0-dev30`, version code `30`.
+
+## 0.29.0-dev29 — memory-editor consistency and delete confirmation (2026-07-31)
+
+- Simplified the memory editor toggles to the same `FAV` and `SKIP` labels used
+  throughout the LIST interface; selected-state colors indicate whether each
+  flag is applied.
+- Added a confirmation dialog showing the memory name and frequency before any
+  memory deletion.
+- Updated application metadata to version `0.29.0-dev29`, version code `29`.
+
+## 0.28.0-dev28 — remembered-radio auto-connect (2026-07-31)
+
+- Remember the BLE address only after an ATS Mini answers the `Z?` capability
+  probe successfully.
+- On a fresh app launch, scan briefly for that saved receiver and connect to it
+  automatically.
+- If the saved receiver is absent, fails to connect, or does not pass the
+  capability probe, fall back to the normal receiver scan.
+- Let any newly selected and verified ATS Mini replace the previously saved
+  address automatically.
+- Keep `DISCO` manual for the current app session; automatic connection is tried
+  again only after a fresh launch.
+- Updated application metadata to version `0.28.0-dev28`, version code `28`.
+
 ## 0.27.0-dev27 — field-test checkpoint (2026-07-31)
 
 ### Radio and display

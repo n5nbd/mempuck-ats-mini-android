@@ -83,6 +83,13 @@ enum class StatusStreamState {
     Active,
 }
 
+enum class StartupReconnectStage {
+    Idle,
+    Looking,
+    Connecting,
+    Verifying,
+}
+
 data class RadioSnapshot(
     val scanning: Boolean = false,
     val devices: List<AtsDevice> = emptyList(),
@@ -95,5 +102,6 @@ data class RadioSnapshot(
     val lastLowBandMode: RadioMode = RadioMode.USB,
     val tuneState: TuneState = TuneState.Idle,
     val vfoScanning: Boolean = false,
+    val startupReconnectStage: StartupReconnectStage = StartupReconnectStage.Idle,
     val log: List<String> = emptyList(),
 )

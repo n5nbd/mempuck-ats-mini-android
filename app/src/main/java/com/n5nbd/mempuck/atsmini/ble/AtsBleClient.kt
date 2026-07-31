@@ -168,7 +168,7 @@ class AtsBleClient(
     }
 
     @SuppressLint("MissingPermission")
-    fun startScan() {
+    fun startScan(targetAddress: String? = null, windowMs: Long = SCAN_WINDOW_MS) {
         stopScanInternal()
         val currentAdapter = adapter
         if (currentAdapter == null) {
@@ -186,11 +186,13 @@ class AtsBleClient(
             return
         }
 
-        val filters = listOf(
-            ScanFilter.Builder()
-                .setServiceUuid(ParcelUuid(UART_SERVICE_UUID))
-                .build(),
-        )
+        val filter = ScanFilter.Builder()
+            .setServiceUuid(ParcelUuid(UART_SERVICE_UUID))
+            .apply {
+                if (targetAddress != null) setDeviceAddress(targetAddress)
+            }
+            .build()
+        val filters = listOf(filter)
         val settings = ScanSettings.Builder()
             .setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY)
             .build()
@@ -198,7 +200,7 @@ class AtsBleClient(
         scanner.startScan(filters, settings, scanCallback)
         scanning = true
         listener.onScanState(true)
-        mainHandler.postDelayed(stopScanRunnable, SCAN_WINDOW_MS)
+        mainHandler.postDelayed(stopScanRunnable, windowMs.coerceAtLeast(1L))
     }
 
     @SuppressLint("MissingPermission")

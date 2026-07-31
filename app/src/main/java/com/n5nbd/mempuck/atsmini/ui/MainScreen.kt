@@ -55,7 +55,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.PointerEventPass
@@ -76,6 +78,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import com.n5nbd.mempuck.atsmini.BuildConfig
 import com.n5nbd.mempuck.atsmini.model.AtsFrequencyPlan
 import com.n5nbd.mempuck.atsmini.model.AtsFrequencyRegion
 import com.n5nbd.mempuck.atsmini.model.CapabilityState
@@ -87,6 +90,7 @@ import com.n5nbd.mempuck.atsmini.model.memoryTagTokens
 import com.n5nbd.mempuck.atsmini.model.RadioMode
 import com.n5nbd.mempuck.atsmini.model.RadioSnapshot
 import com.n5nbd.mempuck.atsmini.model.StatusStreamState
+import com.n5nbd.mempuck.atsmini.model.StartupReconnectStage
 import com.n5nbd.mempuck.atsmini.model.TuneState
 import kotlinx.coroutines.delay
 import kotlin.math.abs
@@ -128,11 +132,23 @@ enum class HfVfoLargeStep(
     KHz10(10_000L, "10 KHZ"),
 }
 
+enum class ScanDwell(
+    val millis: Long,
+    val label: String,
+) {
+    Seconds1(1_000L, "1"),
+    Seconds2(2_000L, "2"),
+    Seconds5(5_000L, "5"),
+    Seconds10(10_000L, "10"),
+}
+
 private enum class ConfigSection {
     Display,
     TuningSteps,
     RadioLink,
+    Scan,
     Debug,
+    About,
 }
 
 private enum class AppTab(val label: String) {
@@ -198,6 +214,8 @@ fun MainScreen(
     onHfVfoSmallStep: (HfVfoSmallStep) -> Unit,
     hfVfoLargeStep: HfVfoLargeStep,
     onHfVfoLargeStep: (HfVfoLargeStep) -> Unit,
+    scanDwell: ScanDwell,
+    onScanDwell: (ScanDwell) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val memories by viewModel.memories.collectAsStateWithLifecycle()
@@ -239,10 +257,17 @@ fun MainScreen(
     )
 
     LaunchedEffect(permissionsGranted, scanAfterPermission) {
-        if (permissionsGranted && scanAfterPermission) {
+        if (!permissionsGranted) return@LaunchedEffect
+        if (scanAfterPermission) {
             scanAfterPermission = false
             viewModel.startScan()
+        } else {
+            viewModel.startAutoConnect()
         }
+    }
+
+    LaunchedEffect(scanDwell) {
+        viewModel.setScanDwellMs(scanDwell.millis)
     }
 
     LaunchedEffect(availableMemoryTags) {
@@ -284,14 +309,20 @@ fun MainScreen(
                 color = colors.background,
                 contentColor = colors.foreground,
             ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .verticalScroll(rememberScrollState())
-                        .padding(8.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Header(
+                if (state.startupReconnectStage != StartupReconnectStage.Idle) {
+                    StartupReconnectScreen(
+                        stage = state.startupReconnectStage,
+                        colors = colors,
+                    )
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .verticalScroll(rememberScrollState())
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Header(
                         state = state,
                         selectedTab = tab,
                         colors = colors,
@@ -376,6 +407,8 @@ fun MainScreen(
                             onHfVfoSmallStep = onHfVfoSmallStep,
                             hfVfoLargeStep = hfVfoLargeStep,
                             onHfVfoLargeStep = onHfVfoLargeStep,
+                            scanDwell = scanDwell,
+                            onScanDwell = onScanDwell,
                             startScan = viewModel::startScan,
                             stopScan = viewModel::stopScan,
                             disconnect = viewModel::disconnect,
@@ -383,6 +416,7 @@ fun MainScreen(
                             connect = viewModel::connect,
                         )
                     }
+                }
                 }
             }
 
@@ -1557,6 +1591,7 @@ private fun MemoryEditorDialog(
     var notes by remember(existing?.id) { mutableStateOf(existing?.notes.orEmpty()) }
     var favorite by remember(existing?.id) { mutableStateOf(existing?.favorite ?: false) }
     var skip by remember(existing?.id) { mutableStateOf(existing?.skip ?: false) }
+    var deleteConfirmationVisible by remember(existing?.id) { mutableStateOf(false) }
 
     val parsedFrequency = parseFrequencyText(frequencyText)
     val normalizedFrequency = parsedFrequency?.let(AtsFrequencyPlan::normalizeReceiverFrequency)
@@ -1682,7 +1717,7 @@ private fun MemoryEditorDialog(
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 PuckButton(
-                    text = "FAVORITE ${if (favorite) "ON" else "OFF"}",
+                    text = "FAV",
                     selected = favorite,
                     colors = colors,
                     onClick = { favorite = !favorite },
@@ -1691,7 +1726,7 @@ private fun MemoryEditorDialog(
                     fontSize = 13.sp,
                 )
                 PuckButton(
-                    text = "SKIP ${if (skip) "ON" else "OFF"}",
+                    text = "SKIP",
                     selected = skip,
                     colors = colors,
                     onClick = { skip = !skip },
@@ -1731,7 +1766,7 @@ private fun MemoryEditorDialog(
                     PuckButton(
                         text = "DELETE",
                         colors = colors,
-                        onClick = { onDelete(existing.id) },
+                        onClick = { deleteConfirmationVisible = true },
                         modifier = Modifier.weight(1f),
                         height = 48.dp,
                         fontSize = 14.sp,
@@ -1755,6 +1790,64 @@ private fun MemoryEditorDialog(
                     height = 48.dp,
                     fontSize = 14.sp,
                 )
+            }
+        }
+    }
+
+    if (deleteConfirmationVisible && existing != null) {
+        Dialog(onDismissRequest = { deleteConfirmationVisible = false }) {
+            Surface(
+                color = colors.background,
+                contentColor = colors.foreground,
+                shape = PanelShape,
+                border = BorderStroke(3.dp, colors.foreground),
+            ) {
+                Column(
+                    modifier = Modifier.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    Text(
+                        text = "DELETE MEMORY?",
+                        fontSize = 20.sp,
+                        fontWeight = FontWeight.Black,
+                    )
+                    Text(
+                        text = existing.name,
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        text = formatFrequencyHz(existing.frequencyHz),
+                        color = colors.muted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize = 15.sp,
+                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    ) {
+                        PuckButton(
+                            text = "CANCEL",
+                            colors = colors,
+                            onClick = { deleteConfirmationVisible = false },
+                            modifier = Modifier.weight(1f),
+                            height = 46.dp,
+                        )
+                        PuckButton(
+                            text = "DELETE",
+                            colors = colors,
+                            selected = true,
+                            onClick = {
+                                deleteConfirmationVisible = false
+                                onDelete(existing.id)
+                            },
+                            modifier = Modifier.weight(1f),
+                            height = 46.dp,
+                        )
+                    }
+                }
             }
         }
     }
@@ -2042,6 +2135,139 @@ private fun FrequencySourceFileRow(
     }
 }
 
+private fun startupReconnectText(stage: StartupReconnectStage): String = when (stage) {
+    StartupReconnectStage.Idle -> ""
+    StartupReconnectStage.Looking -> "LOOKING FOR SAVED ATS MINI..."
+    StartupReconnectStage.Connecting -> "CONNECTING TO ATS MINI..."
+    StartupReconnectStage.Verifying -> "VERIFYING MEMPUCK FIRMWARE..."
+}
+
+@Composable
+private fun StartupReconnectScreen(
+    stage: StartupReconnectStage,
+    colors: PuckColors,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(24.dp),
+        contentAlignment = Alignment.Center,
+    ) {
+        AboutContent(
+            colors = colors,
+            statusText = startupReconnectText(stage),
+            compact = false,
+        )
+    }
+}
+
+@Composable
+private fun AboutContent(
+    colors: PuckColors,
+    statusText: String? = null,
+    compact: Boolean,
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp),
+    ) {
+        PuckSilhouette(
+            colors = colors,
+            compact = compact,
+        )
+        Text(
+            text = "MEMPUCK",
+            fontSize = if (compact) 24.sp else 31.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 2.sp,
+        )
+        Text(
+            text = "FOR ATS MINI",
+            fontSize = if (compact) 16.sp else 20.sp,
+            fontWeight = FontWeight.Black,
+            letterSpacing = 1.sp,
+        )
+        Text(
+            text = "VERSION ${BuildConfig.VERSION_NAME}",
+            fontFamily = FontFamily.Monospace,
+            fontSize = if (compact) 13.sp else 15.sp,
+        )
+        Text(
+            text = "BLE CONTROLLER • VFO • MEMORY",
+            fontSize = if (compact) 12.sp else 14.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        if (!statusText.isNullOrBlank()) {
+            Spacer(Modifier.height(if (compact) 2.dp else 8.dp))
+            Text(
+                text = statusText,
+                fontFamily = FontFamily.Monospace,
+                fontSize = if (compact) 13.sp else 16.sp,
+                fontWeight = FontWeight.Black,
+            )
+        }
+        Text(
+            text = "Mark Zimmerman, N5NBD",
+            color = colors.muted,
+            fontSize = if (compact) 11.sp else 12.sp,
+        )
+        Text(
+            text = "Polyform Noncommercial Licence",
+            color = colors.muted,
+            fontSize = if (compact) 11.sp else 12.sp,
+        )
+    }
+}
+
+@Composable
+private fun PuckSilhouette(
+    colors: PuckColors,
+    compact: Boolean,
+) {
+    Canvas(
+        modifier = Modifier
+            .width(if (compact) 132.dp else 184.dp)
+            .height(if (compact) 78.dp else 108.dp),
+    ) {
+        val puckLeft = size.width * 0.08f
+        val puckTop = size.height * 0.15f
+        val puckWidth = size.width * 0.70f
+        val puckHeight = size.height * 0.68f
+        val ellipseHeight = size.height * 0.32f
+        val bodyTop = puckTop + ellipseHeight * 0.45f
+
+        drawRoundRect(
+            color = colors.foreground,
+            topLeft = Offset(puckLeft, bodyTop),
+            size = Size(puckWidth, puckHeight - ellipseHeight * 0.25f),
+            cornerRadius = CornerRadius(ellipseHeight * 0.35f, ellipseHeight * 0.35f),
+        )
+        drawOval(
+            color = colors.foreground,
+            topLeft = Offset(puckLeft, puckTop),
+            size = Size(puckWidth, ellipseHeight),
+        )
+
+        val cableY = puckTop + puckHeight * 0.58f
+        val cableStartX = puckLeft + puckWidth * 0.92f
+        val cableEndX = size.width * 0.92f
+        drawLine(
+            color = colors.foreground,
+            start = Offset(cableStartX, cableY),
+            end = Offset(cableEndX, cableY),
+            strokeWidth = size.height * 0.10f,
+            cap = StrokeCap.Round,
+        )
+        drawRoundRect(
+            color = colors.foreground,
+            topLeft = Offset(cableEndX - size.width * 0.01f, cableY - size.height * 0.11f),
+            size = Size(size.width * 0.08f, size.height * 0.22f),
+            cornerRadius = CornerRadius(size.height * 0.03f, size.height * 0.03f),
+        )
+    }
+}
+
 @Composable
 private fun ConfigScreen(
     state: RadioSnapshot,
@@ -2058,6 +2284,8 @@ private fun ConfigScreen(
     onHfVfoSmallStep: (HfVfoSmallStep) -> Unit,
     hfVfoLargeStep: HfVfoLargeStep,
     onHfVfoLargeStep: (HfVfoLargeStep) -> Unit,
+    scanDwell: ScanDwell,
+    onScanDwell: (ScanDwell) -> Unit,
     startScan: () -> Unit,
     stopScan: () -> Unit,
     disconnect: () -> Unit,
@@ -2168,7 +2396,7 @@ private fun ConfigScreen(
         }
     }
 
-    Spacer(Modifier.height(10.dp))
+    Spacer(Modifier.height(1.dp))
 
     ConfigWindow(
         title = "DISPLAY",
@@ -2236,7 +2464,7 @@ private fun ConfigScreen(
         }
     }
 
-    Spacer(Modifier.height(10.dp))
+    Spacer(Modifier.height(1.dp))
 
     ConfigWindow(
         title = "TUNING STEPS",
@@ -2313,7 +2541,38 @@ private fun ConfigScreen(
         }
     }
 
-    Spacer(Modifier.height(10.dp))
+    Spacer(Modifier.height(1.dp))
+
+    ConfigWindow(
+        title = "SCAN",
+        expanded = expandedSectionName == ConfigSection.Scan.name,
+        colors = colors,
+        onToggle = { toggleSection(ConfigSection.Scan) },
+    ) {
+        Text(
+            text = "VFO AND MEMORY DWELL (SECONDS)",
+            fontSize = 15.sp,
+            fontWeight = FontWeight.Black,
+        )
+        Spacer(Modifier.height(7.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(6.dp),
+        ) {
+            ScanDwell.entries.forEach { dwell ->
+                PuckButton(
+                    text = dwell.label,
+                    selected = scanDwell == dwell,
+                    colors = colors,
+                    onClick = { onScanDwell(dwell) },
+                    modifier = Modifier.weight(1f),
+                    fontSize = 14.sp,
+                )
+            }
+        }
+    }
+
+    Spacer(Modifier.height(1.dp))
 
     ConfigWindow(
         title = "DEBUG",
@@ -2344,6 +2603,20 @@ private fun ConfigScreen(
                 }
             }
         }
+    }
+
+    Spacer(Modifier.height(1.dp))
+
+    ConfigWindow(
+        title = "ABOUT",
+        expanded = expandedSectionName == ConfigSection.About.name,
+        colors = colors,
+        onToggle = { toggleSection(ConfigSection.About) },
+    ) {
+        AboutContent(
+            colors = colors,
+            compact = true,
+        )
     }
 }
 
