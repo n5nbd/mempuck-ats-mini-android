@@ -1,36 +1,33 @@
-# MemPuck for ATS Mini — latched scan and FM controls v005
+# MemPuck for ATS Mini — connected display and compact config v006
 
-This checkpoint builds on the hardware-tested v004 VFO/MEM and volume baseline.
-It corrects the FM digit behavior and makes VFO scanning work as a hands-off
-listening tool.
+This checkpoint builds on the hardware-tested v005 FM scan-control baseline. It
+keeps the working radio controls unchanged and concentrates on the Pixel 6 as a
+stable dedicated controller.
 
-## Added in v005
+## Added in v006
 
-- Holding an upper or lower digit arrow starts VFO scanning in that direction.
-- Releasing the digit does **not** stop the scan.
-- The next touch anywhere in the MemPuck app stops scanning and is consumed, so
-  it does not accidentally activate another control.
-- In FM, the full frequency remains visible, including trailing zeros.
-- The four least-significant FM digits have no up/down arrows because the ATS
-  Mini FM backend tunes in 10 kHz units.
-- FM targets are normalized to the receiver's 10 kHz grid before `Z` is sent,
-  preventing the target display from fighting the frequency reported by the
-  radio.
+- While the ATS Mini BLE link is ready, MemPuck keeps the Android display awake.
+- After 30 seconds without a touch, the app dims the display to 6% brightness.
+- Any touch restores the normal Android brightness and restarts the dim timer.
+- Disconnecting or closing the controller restores Android's normal brightness
+  and screen-sleep behavior.
+- The CONFIG disconnect button is now `DISCO`, keeping the control row balanced.
+- The protocol log is hidden behind a `DEBUG` toggle. When DEBUG is off, the
+  panel shrinks to the toggle alone. When enabled, it opens a 220 dp scrolling
+  log showing the latest 80 protocol lines.
+- Display choices are now `DARK`, `LIGHT`, and `HUE`.
+- DARK is white on black; LIGHT is black on white.
+- HUE reveals a slider and uses the selected hue on black throughout MemPuck.
+  Theme and hue selection are saved locally.
 
-## ATS Mini FM-resolution note
+## Existing v005 behavior retained
 
-The ATS Mini's FM receiver tunes in 10 kHz increments. MemPuck therefore shows
-all frequency digits but offers FM digit controls only down to the 10 kHz
-position. This is an ATS Mini receiver limitation, not a MemPuck list-size or UI
-restriction. The entire 64–108 MHz ATS FM range remains available, including the
-spectrum below the conventional broadcast band.
-
-## Frequency-driven operation retained
-
-- **150 kHz through 30 MHz:** `LSB | USB | CW | AM`.
-- **64 through 108 MHz:** mode row hidden; FM selected automatically.
-- **30–64 MHz gap:** rejected before any BLE tuning command is sent.
-- Logical CW remains mapped to ATS USB.
+- Frequency-driven low-band/FM mode selection.
+- Full FM frequency display with controls only down to the ATS Mini's real
+  10 kHz FM tuning resolution.
+- Latched VFO scanning stopped by the next touch anywhere.
+- VFO/MEM selector and horizontal ATS volume control.
+- Absolute `Z` tuning and live status over BLE.
 
 ## Receiver setup
 

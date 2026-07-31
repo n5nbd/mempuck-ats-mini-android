@@ -1,5 +1,19 @@
 # Changelog
 
+## v006 — connected display and compact configuration
+
+- Kept the Pixel display awake while the ATS Mini BLE link is ready so Android
+  screen sleep does not tear down the active controller session.
+- Added a 30-second inactivity dimmer that reduces the connected controller to
+  6% brightness; any touch restores the normal Android brightness immediately.
+- Replaced the oversized `DISCONNECT` button label with the five-character
+  `DISCO` label.
+- Collapsed the protocol log behind a `DEBUG` toggle. With DEBUG off, the panel
+  contains only the toggle; with DEBUG on, it opens a fixed-height scrolling log.
+- Replaced the old theme selector with `DARK`, `LIGHT`, and `HUE`. The hue mode
+  uses the selected color on black and persists the selected hue locally.
+- Matched Android system bars to the selected dark/light background.
+
 ## v005 — latched scanning and FM-resolution controls
 
 - Changed VFO hold scanning to latch after the long press; releasing the digit

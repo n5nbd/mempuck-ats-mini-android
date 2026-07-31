@@ -1,5 +1,9 @@
 package com.n5nbd.mempuck.atsmini.ui
 
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
+import android.view.WindowManager
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -41,6 +45,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
@@ -60,6 +65,7 @@ import com.n5nbd.mempuck.atsmini.model.RadioMode
 import com.n5nbd.mempuck.atsmini.model.RadioSnapshot
 import com.n5nbd.mempuck.atsmini.model.StatusStreamState
 import com.n5nbd.mempuck.atsmini.model.TuneState
+import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -68,6 +74,7 @@ private val PanelShape = RoundedCornerShape(5.dp)
 enum class ThemeChoice {
     Dark,
     Light,
+    Hue,
 }
 
 private enum class AppTab(val label: String) {
@@ -85,7 +92,7 @@ private data class PuckColors(
     val muted: Color,
 )
 
-private fun colorsFor(theme: ThemeChoice): PuckColors = when (theme) {
+private fun colorsFor(theme: ThemeChoice, hueDegrees: Float): PuckColors = when (theme) {
     ThemeChoice.Dark -> PuckColors(
         background = Color.Black,
         foreground = Color.White,
@@ -101,6 +108,21 @@ private fun colorsFor(theme: ThemeChoice): PuckColors = when (theme) {
         selectedForeground = Color.White,
         muted = Color(0xFF555555),
     )
+
+    ThemeChoice.Hue -> {
+        val hue = Color.hsv(
+            hue = hueDegrees.coerceIn(0f, 359.9f),
+            saturation = 1f,
+            value = 1f,
+        )
+        PuckColors(
+            background = Color.Black,
+            foreground = hue,
+            selectedBackground = hue,
+            selectedForeground = Color.Black,
+            muted = hue,
+        )
+    }
 }
 
 @Composable
@@ -110,24 +132,37 @@ fun MainScreen(
     requestPermissions: () -> Unit,
     themeChoice: ThemeChoice,
     onThemeChoice: (ThemeChoice) -> Unit,
+    hueDegrees: Float,
+    onHueDegrees: (Float) -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableStateOf(AppTab.Radio) }
-    val colors = colorsFor(themeChoice)
+    var interactionSequence by remember { mutableStateOf(0L) }
+    val colors = colorsFor(themeChoice, hueDegrees)
+    val keepControllerAwake = state.link is LinkState.Ready
+
+    ConnectedScreenGuard(
+        connected = keepControllerAwake,
+        interactionSequence = interactionSequence,
+    )
 
     MaterialTheme {
         Surface(
             modifier = Modifier
                 .fillMaxSize()
                 .pointerInput(state.vfoScanning) {
-                    if (!state.vfoScanning) return@pointerInput
                     awaitPointerEventScope {
-                        val down = awaitFirstDown(
-                            requireUnconsumed = false,
-                            pass = PointerEventPass.Initial,
-                        )
-                        down.consume()
-                        viewModel.stopVfoScan()
+                        while (true) {
+                            val down = awaitFirstDown(
+                                requireUnconsumed = false,
+                                pass = PointerEventPass.Initial,
+                            )
+                            interactionSequence += 1L
+                            if (state.vfoScanning) {
+                                down.consume()
+                                viewModel.stopVfoScan()
+                            }
+                        }
                     }
                 },
             color = colors.background,
@@ -174,6 +209,8 @@ fun MainScreen(
                         requestPermissions = requestPermissions,
                         themeChoice = themeChoice,
                         onThemeChoice = onThemeChoice,
+                        hueDegrees = hueDegrees,
+                        onHueDegrees = onHueDegrees,
                         startScan = viewModel::startScan,
                         stopScan = viewModel::stopScan,
                         disconnect = viewModel::disconnect,
@@ -685,6 +722,8 @@ private fun ConfigScreen(
     requestPermissions: () -> Unit,
     themeChoice: ThemeChoice,
     onThemeChoice: (ThemeChoice) -> Unit,
+    hueDegrees: Float,
+    onHueDegrees: (Float) -> Unit,
     startScan: () -> Unit,
     stopScan: () -> Unit,
     disconnect: () -> Unit,
@@ -693,7 +732,6 @@ private fun ConfigScreen(
 ) {
     PuckPanel(colors = colors) {
         SectionTitle("DISPLAY")
-        Text("MemPuck layout and interaction remain identical across themes.")
         Spacer(Modifier.height(9.dp))
         Row(
             modifier = Modifier.fillMaxWidth(),
@@ -713,6 +751,45 @@ private fun ConfigScreen(
                 onClick = { onThemeChoice(ThemeChoice.Light) },
                 modifier = Modifier.weight(1f),
             )
+            PuckButton(
+                text = "HUE",
+                selected = themeChoice == ThemeChoice.Hue,
+                colors = colors,
+                onClick = { onThemeChoice(ThemeChoice.Hue) },
+                modifier = Modifier.weight(1f),
+            )
+        }
+
+        if (themeChoice == ThemeChoice.Hue) {
+            Spacer(Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    text = "HUE",
+                    fontWeight = FontWeight.Black,
+                    fontSize = 15.sp,
+                )
+                Slider(
+                    value = hueDegrees,
+                    onValueChange = onHueDegrees,
+                    valueRange = 0f..359f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = colors.foreground,
+                        activeTrackColor = colors.foreground,
+                        inactiveTrackColor = colors.foreground,
+                    ),
+                    modifier = Modifier.weight(1f),
+                )
+                Text(
+                    text = "${hueDegrees.roundToInt().toString().padStart(3, '0')}°",
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Black,
+                    fontSize = 15.sp,
+                )
+            }
         }
     }
 
@@ -755,7 +832,7 @@ private fun ConfigScreen(
                 )
             }
             PuckButton(
-                text = "DISCONNECT",
+                text = "DISCO",
                 colors = colors,
                 enabled = state.link !is LinkState.Disconnected,
                 onClick = disconnect,
@@ -804,19 +881,94 @@ private fun ConfigScreen(
 
     Spacer(Modifier.height(10.dp))
 
+    var debugExpanded by rememberSaveable { mutableStateOf(false) }
+    val protocolScroll = rememberScrollState()
+
+    LaunchedEffect(debugExpanded, state.log.size) {
+        if (debugExpanded) {
+            protocolScroll.scrollTo(protocolScroll.maxValue)
+        }
+    }
+
     PuckPanel(colors = colors) {
-        SectionTitle("PROTOCOL LOG")
-        if (state.log.isEmpty()) {
-            Text("No protocol traffic yet", color = colors.muted)
-        } else {
-            state.log.takeLast(40).forEach { line ->
-                Text(
-                    text = line,
-                    fontFamily = FontFamily.Monospace,
-                    fontSize = 11.sp,
-                )
+        PuckButton(
+            text = "DEBUG",
+            selected = debugExpanded,
+            colors = colors,
+            onClick = { debugExpanded = !debugExpanded },
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        if (debugExpanded) {
+            Spacer(Modifier.height(8.dp))
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(220.dp)
+                    .verticalScroll(protocolScroll),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                if (state.log.isEmpty()) {
+                    Text("No protocol traffic yet", color = colors.muted)
+                } else {
+                    state.log.takeLast(80).forEach { line ->
+                        Text(
+                            text = line,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize = 11.sp,
+                        )
+                    }
+                }
             }
         }
+    }
+}
+
+@Composable
+private fun ConnectedScreenGuard(
+    connected: Boolean,
+    interactionSequence: Long,
+) {
+    val context = LocalContext.current
+    val activity = remember(context) { context.findActivity() }
+
+    DisposableEffect(activity, connected) {
+        val window = activity?.window
+        if (window != null && connected) {
+            window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        } else if (window != null) {
+            window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window.setMemPuckBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE)
+        }
+
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            window?.setMemPuckBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE)
+        }
+    }
+
+    LaunchedEffect(activity, connected, interactionSequence) {
+        val window = activity?.window ?: return@LaunchedEffect
+        if (!connected) {
+            window.setMemPuckBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE)
+            return@LaunchedEffect
+        }
+
+        window.setMemPuckBrightness(WindowManager.LayoutParams.BRIGHTNESS_OVERRIDE_NONE)
+        delay(CONNECTED_SCREEN_DIM_DELAY_MS)
+        window.setMemPuckBrightness(CONNECTED_SCREEN_DIM_BRIGHTNESS)
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
+
+private fun android.view.Window.setMemPuckBrightness(brightness: Float) {
+    attributes = attributes.apply {
+        screenBrightness = brightness
     }
 }
 
@@ -972,6 +1124,9 @@ private val POWERS_OF_TEN = longArrayOf(
     10_000_000L,
     100_000_000L,
 )
+
+private const val CONNECTED_SCREEN_DIM_DELAY_MS = 30_000L
+private const val CONNECTED_SCREEN_DIM_BRIGHTNESS = 0.06f
 
 private val LOW_BAND_MODES = listOf(
     RadioMode.LSB,

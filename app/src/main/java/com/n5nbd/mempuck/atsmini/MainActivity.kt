@@ -7,6 +7,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -39,6 +40,9 @@ class MainActivity : ComponentActivity() {
                     }.getOrDefault(ThemeChoice.Dark),
                 )
             }
+            var hueDegrees by remember {
+                mutableFloatStateOf(preferences.getFloat("hueDegrees", 180f))
+            }
             var permissionsGranted by remember {
                 mutableStateOf(hasBluetoothPermissions(context))
             }
@@ -48,13 +52,14 @@ class MainActivity : ComponentActivity() {
                 permissionsGranted = hasBluetoothPermissions(context)
             }
 
-            val dark = themeChoice == ThemeChoice.Dark
+            val lightSystemBars = themeChoice == ThemeChoice.Light
             SideEffect {
-                window.statusBarColor = (if (dark) Color.Black else Color.White).toArgb()
-                window.navigationBarColor = Color.Black.toArgb()
+                val systemBarColor = if (lightSystemBars) Color.White else Color.Black
+                window.statusBarColor = systemBarColor.toArgb()
+                window.navigationBarColor = systemBarColor.toArgb()
                 WindowCompat.getInsetsController(window, window.decorView).apply {
-                    isAppearanceLightStatusBars = !dark
-                    isAppearanceLightNavigationBars = false
+                    isAppearanceLightStatusBars = lightSystemBars
+                    isAppearanceLightNavigationBars = lightSystemBars
                 }
             }
 
@@ -73,6 +78,11 @@ class MainActivity : ComponentActivity() {
                 onThemeChoice = { selected ->
                     themeChoice = selected
                     preferences.edit().putString("theme", selected.name).apply()
+                },
+                hueDegrees = hueDegrees,
+                onHueDegrees = { selected ->
+                    hueDegrees = selected.coerceIn(0f, 359f)
+                    preferences.edit().putFloat("hueDegrees", hueDegrees).apply()
                 },
             )
         }
