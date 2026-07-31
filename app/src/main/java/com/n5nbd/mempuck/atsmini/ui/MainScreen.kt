@@ -4,6 +4,7 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -38,6 +39,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.TextStyle
@@ -115,7 +117,19 @@ fun MainScreen(
 
     MaterialTheme {
         Surface(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier
+                .fillMaxSize()
+                .pointerInput(state.vfoScanning) {
+                    if (!state.vfoScanning) return@pointerInput
+                    awaitPointerEventScope {
+                        val down = awaitFirstDown(
+                            requireUnconsumed = false,
+                            pass = PointerEventPass.Initial,
+                        )
+                        down.consume()
+                        viewModel.stopVfoScan()
+                    }
+                },
             color = colors.background,
             contentColor = colors.foreground,
         ) {
@@ -275,7 +289,6 @@ private fun RadioScreen(
             colors = colors,
             onChange = tuneFrequency,
             onScanStart = startVfoScan,
-            onScanStop = stopVfoScan,
         )
 
         Spacer(Modifier.height(16.dp))
@@ -383,9 +396,9 @@ private fun FrequencyDigits(
     colors: PuckColors,
     onChange: (Long) -> Unit,
     onScanStart: (Long) -> Unit,
-    onScanStop: () -> Unit,
 ) {
     val digits = frequencyDigits(frequencyHz)
+    val fmMode = AtsFrequencyPlan.regionFor(frequencyHz) == AtsFrequencyRegion.BroadcastFm
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(5.dp),
@@ -393,9 +406,11 @@ private fun FrequencyDigits(
     ) {
         digits.forEachIndexed { index, digit ->
             val place = POWERS_OF_TEN[digits.length - index - 1]
+            val showArrows = !fmMode || place >= AtsFrequencyPlan.FM_TUNING_RESOLUTION_HZ
             DigitControl(
                 digit = digit,
                 enabled = enabled,
+                showArrows = showArrows,
                 colors = colors,
                 onUp = {
                     onChange(
@@ -415,7 +430,6 @@ private fun FrequencyDigits(
                 },
                 onScanUp = { onScanStart(place) },
                 onScanDown = { onScanStart(-place) },
-                onScanStop = onScanStop,
                 modifier = Modifier.weight(1f),
             )
             val digitsRemaining = digits.length - index - 1
@@ -437,12 +451,12 @@ private fun FrequencyDigits(
 private fun DigitControl(
     digit: Char,
     enabled: Boolean,
+    showArrows: Boolean,
     colors: PuckColors,
     onUp: () -> Unit,
     onDown: () -> Unit,
     onScanUp: () -> Unit,
     onScanDown: () -> Unit,
-    onScanStop: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Column(
@@ -452,15 +466,18 @@ private fun DigitControl(
             .alpha(if (enabled) 1f else 0.55f),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        DigitArea(
-            text = "▲",
-            colors = colors,
-            enabled = enabled,
-            onClick = onUp,
-            onHoldStart = onScanUp,
-            onHoldEnd = onScanStop,
-            modifier = Modifier.weight(1f),
-        )
+        if (showArrows) {
+            DigitArea(
+                text = "▲",
+                colors = colors,
+                enabled = enabled,
+                onClick = onUp,
+                onHoldStart = onScanUp,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
+        }
         Box(
             modifier = Modifier
                 .fillMaxWidth()
@@ -486,15 +503,18 @@ private fun DigitControl(
                 .height(1.dp)
                 .background(colors.foreground),
         )
-        DigitArea(
-            text = "▼",
-            colors = colors,
-            enabled = enabled,
-            onClick = onDown,
-            onHoldStart = onScanDown,
-            onHoldEnd = onScanStop,
-            modifier = Modifier.weight(1f),
-        )
+        if (showArrows) {
+            DigitArea(
+                text = "▼",
+                colors = colors,
+                enabled = enabled,
+                onClick = onDown,
+                onHoldStart = onScanDown,
+                modifier = Modifier.weight(1f),
+            )
+        } else {
+            Spacer(modifier = Modifier.weight(1f))
+        }
     }
 }
 
@@ -505,27 +525,15 @@ private fun DigitArea(
     enabled: Boolean,
     onClick: () -> Unit,
     onHoldStart: () -> Unit,
-    onHoldEnd: () -> Unit,
     modifier: Modifier,
 ) {
     Box(
         modifier = modifier
             .fillMaxWidth()
-            .pointerInput(enabled, onClick, onHoldStart, onHoldEnd) {
+            .pointerInput(enabled, onClick, onHoldStart) {
                 if (!enabled) return@pointerInput
-                var longPressActive = false
                 detectTapGestures(
-                    onPress = {
-                        tryAwaitRelease()
-                        if (longPressActive) {
-                            longPressActive = false
-                            onHoldEnd()
-                        }
-                    },
-                    onLongPress = {
-                        longPressActive = true
-                        onHoldStart()
-                    },
+                    onLongPress = { onHoldStart() },
                     onTap = { onClick() },
                 )
             },

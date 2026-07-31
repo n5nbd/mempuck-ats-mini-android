@@ -1,5 +1,17 @@
 # Changelog
 
+## v005 — latched scanning and FM-resolution controls
+
+- Changed VFO hold scanning to latch after the long press; releasing the digit
+  control no longer stops it.
+- Added a full-screen touch catcher while scanning so the next touch anywhere
+  in MemPuck stops the scan without activating another control.
+- Kept the complete FM frequency display but removed arrows from the four
+  least-significant digits, leaving 10 kHz as the smallest interactive FM step.
+- Normalized FM commands to the ATS Mini's 10 kHz receiver grid to eliminate
+  returned-status flutter.
+- Documented the 10 kHz FM resolution as an ATS Mini limitation.
+
 ## v004 — VFO/MEM, hold scanning, and volume
 
 - Converted the center VFO button into a dual-state `VFO` / `MEM` control.

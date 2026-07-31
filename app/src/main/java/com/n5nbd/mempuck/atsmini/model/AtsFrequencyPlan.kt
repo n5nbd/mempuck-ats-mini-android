@@ -18,6 +18,7 @@ object AtsFrequencyPlan {
     const val LOW_BAND_MAX_HZ = 30_000_000L
     const val FM_BAND_MIN_HZ = 64_000_000L
     const val MAX_FREQUENCY_HZ = 108_000_000L
+    const val FM_TUNING_RESOLUTION_HZ = 10_000L
 
     fun regionFor(frequencyHz: Long): AtsFrequencyRegion = when (frequencyHz) {
         in MIN_FREQUENCY_HZ..LOW_BAND_MAX_HZ -> AtsFrequencyRegion.LowBand
@@ -36,6 +37,21 @@ object AtsFrequencyPlan {
     }
 
     /**
+     * The ATS Mini FM backend reports and accepts frequency in 10 kHz units.
+     * Keep the app's authoritative target on that same grid so returned status
+     * cannot make the UI flutter between an unattainable value and the radio's
+     * actual tuned frequency.
+     */
+    fun normalizeReceiverFrequency(frequencyHz: Long): Long =
+        if (regionFor(frequencyHz) == AtsFrequencyRegion.BroadcastFm) {
+            (((frequencyHz + FM_TUNING_RESOLUTION_HZ / 2L) / FM_TUNING_RESOLUTION_HZ) *
+                FM_TUNING_RESOLUTION_HZ)
+                .coerceIn(FM_BAND_MIN_HZ, MAX_FREQUENCY_HZ)
+        } else {
+            frequencyHz
+        }
+
+    /**
      * Digit and VFO controls tune immediately. When one of those controls
      * crosses the receiver's untunable 30-64 MHz gap, jump directly to the
      * next valid edge instead of leaving the UI stranded on an invalid value.
@@ -46,7 +62,8 @@ object AtsFrequencyPlan {
         candidateFrequencyHz: Long,
     ): Long {
         val candidate = candidateFrequencyHz.coerceIn(MIN_FREQUENCY_HZ, MAX_FREQUENCY_HZ)
-        if (candidate <= LOW_BAND_MAX_HZ || candidate >= FM_BAND_MIN_HZ) return candidate
+        if (candidate <= LOW_BAND_MAX_HZ) return candidate
+        if (candidate >= FM_BAND_MIN_HZ) return normalizeReceiverFrequency(candidate)
 
         return if (candidate >= currentFrequencyHz) {
             FM_BAND_MIN_HZ

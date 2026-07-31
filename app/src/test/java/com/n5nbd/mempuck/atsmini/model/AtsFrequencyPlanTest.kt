@@ -43,4 +43,20 @@ class AtsFrequencyPlanTest {
             AtsFrequencyPlan.normalizeInteractiveFrequency(64_100_000L, 54_100_000L),
         )
     }
+
+    @Test
+    fun fmTargetsUseTheAtsTenKilohertzGrid() {
+        assertEquals(
+            101_700_000L,
+            AtsFrequencyPlan.normalizeReceiverFrequency(101_700_001L),
+        )
+        assertEquals(
+            101_710_000L,
+            AtsFrequencyPlan.normalizeReceiverFrequency(101_705_000L),
+        )
+        assertEquals(
+            7_074_123L,
+            AtsFrequencyPlan.normalizeReceiverFrequency(7_074_123L),
+        )
+    }
 }

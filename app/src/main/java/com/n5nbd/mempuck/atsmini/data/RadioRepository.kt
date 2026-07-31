@@ -167,15 +167,16 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
 
     fun tuneFrequency(frequencyHz: Long) {
         val current = _state.value
+        val receiverFrequencyHz = AtsFrequencyPlan.normalizeReceiverFrequency(frequencyHz)
         val logicalMode = AtsFrequencyPlan.modeForFrequency(
-            frequencyHz = frequencyHz,
+            frequencyHz = receiverFrequencyHz,
             lastLowBandMode = current.lastLowBandMode,
         )
         if (logicalMode == null) {
             setTuneFailure(AtsFrequencyPlan.validationMessage(frequencyHz))
             return
         }
-        tuneResolved(frequencyHz, logicalMode)
+        tuneResolved(receiverFrequencyHz, logicalMode)
     }
 
     fun selectLowBandMode(logicalMode: RadioMode) {
