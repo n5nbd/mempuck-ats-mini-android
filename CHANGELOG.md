@@ -42,6 +42,7 @@
 - Added DARK, LIGHT, and HUE presentation with persistent hue selection.
 - Added the V4 launcher icon and retained the connected wake/dim behavior.
 - Updated application metadata to version `0.27.0-dev27`, version code `27`.
+- Added the PolyForm Noncommercial 1.0.0 license and required MemPuck notice for public source publication.
 
 ### Hardware status
 

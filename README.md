@@ -135,3 +135,14 @@ See [Development workflow](docs/DEVELOPMENT.md) for the repository conventions a
 - Absolute volume is not available in the proven ATS firmware.
 
 MemPuck for ATS Mini is intended to remain focused on the ATS Mini rather than grow into a general SDR suite.
+
+## License
+
+MemPuck for ATS Mini is licensed under the
+[PolyForm Noncommercial License 1.0.0](LICENSE). It may be used, studied,
+modified, and shared for permitted noncommercial purposes. Commercial use,
+manufacture, sale, resale, or incorporation into a commercial product requires
+a separate written license from the copyright holder.
+
+The ATS Mini firmware fork is a separate repository and retains the upstream
+MIT license and notices.

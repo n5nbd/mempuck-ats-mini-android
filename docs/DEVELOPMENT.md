@@ -92,3 +92,12 @@ OK,Z,1
 - Keep source packs read-only; write user changes to `USER.json`.
 - `SKIP` affects scan execution only.
 - Do not push commits or tags until the checkpoint has been reviewed on hardware.
+
+## Licensing boundary
+
+- The Android application is licensed under PolyForm Noncommercial 1.0.0.
+- Keep the required copyright and noncommercial notice in `LICENSE`.
+- Do not copy the Android license into the ATS Mini firmware fork. The firmware
+  repository retains its upstream MIT license and attribution.
+- Commercial licensing for MemPuck requires a separate written agreement from
+  the copyright holder.
