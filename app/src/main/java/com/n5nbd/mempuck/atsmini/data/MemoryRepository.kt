@@ -113,6 +113,27 @@ class MemoryRepository(private val context: Context) {
         persistUserChanges("UPDATED ${override.name}")
     }
 
+    /**
+     * Persist a deliberate override for a temporary source record. The selected
+     * frequency directory is required so the result is written to USER.json.
+     */
+    @Synchronized
+    fun saveOverride(entry: MemoryEntry): MemoryEntry {
+        val treeUri = requireTreeUri()
+        val override = entry.copy(
+            id = entry.frequencyHz,
+            name = entry.name.trim(),
+            tags = normalizeMemoryTags(entry.tags),
+            notes = entry.notes.trim(),
+            sourceFile = USER_FREQUENCY_FILE,
+        )
+        userEntries[override.frequencyHz] = override
+        deletedFrequencies.remove(override.frequencyHz)
+        writeUserFile(treeUri)
+        refreshSources("SAVED ${override.name}")
+        return override
+    }
+
     @Synchronized
     fun delete(id: Long) {
         val existing = _entries.value.firstOrNull { it.id == id } ?: return

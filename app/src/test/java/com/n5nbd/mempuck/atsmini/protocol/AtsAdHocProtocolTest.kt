@@ -58,6 +58,11 @@ class AtsAdHocProtocolTest {
     }
 
     @Test
+    fun stockFrequencyCommandUsesHertzAndCarriageReturn() {
+        assertEquals("F14230123\r", AtsAdHocProtocol.frequencyCommand(14_230_123L))
+    }
+
+    @Test
     fun volumeDeltaIsBuiltAsOneReleaseTransaction() {
         assertEquals("VVVV", AtsAdHocProtocol.volumeDeltaCommand(20, 24))
         assertEquals("vvv", AtsAdHocProtocol.volumeDeltaCommand(20, 17))

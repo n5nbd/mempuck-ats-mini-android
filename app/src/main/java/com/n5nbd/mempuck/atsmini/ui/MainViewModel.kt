@@ -5,7 +5,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.n5nbd.mempuck.atsmini.data.MemoryRepository
+import com.n5nbd.mempuck.atsmini.data.NowRepository
 import com.n5nbd.mempuck.atsmini.data.RadioRepository
+import com.n5nbd.mempuck.atsmini.model.ActiveMemorySource
 import com.n5nbd.mempuck.atsmini.model.AtsDevice
 import com.n5nbd.mempuck.atsmini.model.CapabilityState
 import com.n5nbd.mempuck.atsmini.model.LinkState
@@ -17,17 +19,38 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 
 class MainViewModel(
     private val repository: RadioRepository,
     private val memoryRepository: MemoryRepository,
+    private val nowRepository: NowRepository,
 ) : ViewModel() {
     val state = repository.state
-    val memories = memoryRepository.entries
     val frequencySources = memoryRepository.sources
+    val activeMemorySource = nowRepository.activeSource
+    val nowSource = nowRepository.state
+    val memories = combine(
+        memoryRepository.entries,
+        nowRepository.entries,
+        nowRepository.activeSource,
+    ) { curated, now, active ->
+        if (active == ActiveMemorySource.NOW) now else curated
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = if (nowRepository.activeSource.value == ActiveMemorySource.NOW) {
+            nowRepository.entries.value
+        } else {
+            memoryRepository.entries.value
+        },
+    )
 
     private var memoryScanJob: Job? = null
     private var memoryScanGeneration = 0L
@@ -38,6 +61,12 @@ class MainViewModel(
     init {
         viewModelScope.launch(Dispatchers.IO) {
             runSourceOperation { memoryRepository.refreshSources() }
+            if (nowRepository.activeSource.value == ActiveMemorySource.NOW) {
+                runCatching { nowRepository.loadNow() }.onFailure { error ->
+                    nowRepository.loadCurated()
+                    nowRepository.reportError(error.message ?: "Unable to restore NOW source")
+                }
+            }
         }
     }
 
@@ -75,7 +104,7 @@ class MainViewModel(
         if (direction == 0) return
         stopTuneScan()
         val target = memoryStepTarget(
-            memories = memoryRepository.entries.value.filter { it.id in memoryIds },
+            memories = memories.value.filter { it.id in memoryIds },
             currentFrequencyHz = repository.state.value.targetFrequencyHz,
             direction = direction,
         ) ?: return
@@ -89,7 +118,7 @@ class MainViewModel(
 
         val current = repository.state.value
         if (current.link !is LinkState.Ready || current.capability !is CapabilityState.Supported) return
-        if (memoryRepository.entries.value.none { it.id in allowedMemoryIds && it.scanEnabled }) return
+        if (memories.value.none { it.id in allowedMemoryIds && it.scanEnabled }) return
 
         repository.stopVfoScan()
         stopMemoryScan()
@@ -103,7 +132,7 @@ class MainViewModel(
                     if (snapshot.link !is LinkState.Ready || snapshot.capability !is CapabilityState.Supported) break
 
                     if (snapshot.tuneState !is TuneState.Sending) {
-                        val candidates = memoryRepository.entries.value.filter {
+                        val candidates = memories.value.filter {
                             it.id in allowedMemoryIds && it.scanEnabled
                         }
                         if (candidates.isEmpty()) break
@@ -116,8 +145,17 @@ class MainViewModel(
                         if (candidates.size > 1 || target.id != lastSingleEntryId) {
                             repository.recallMemory(target.frequencyHz, target.mode)
                             lastSingleEntryId = target.id
+
+                            val settled = repository.state.first { tuned ->
+                                tuned.link !is LinkState.Ready ||
+                                    tuned.capability !is CapabilityState.Supported ||
+                                    tuned.tuneState !is TuneState.Sending
+                            }
+                            if (settled.tuneState !is TuneState.Confirmed) break
                         }
                     }
+                    // Dwell is the listener's decision window. Start it only after
+                    // the receiver confirms the requested band, mode, and frequency.
                     delay(scanDwellMs)
                 }
             } finally {
@@ -152,7 +190,7 @@ class MainViewModel(
         favorite: Boolean,
         skip: Boolean,
     ) {
-        memoryRepository.create(
+        val created = memoryRepository.create(
             frequencyHz = frequencyHz,
             mode = mode,
             name = name,
@@ -161,11 +199,51 @@ class MainViewModel(
             favorite = favorite,
             skip = skip,
         )
+        if (activeMemorySource.value == ActiveMemorySource.NOW &&
+            nowRepository.entries.value.any { it.frequencyHz == created.frequencyHz }
+        ) {
+            nowRepository.replaceEntry(created)
+        }
     }
 
-    fun updateMemory(entry: MemoryEntry) = memoryRepository.update(entry)
-    fun deleteMemory(id: Long) = memoryRepository.delete(id)
+    fun updateMemory(entry: MemoryEntry) {
+        if (activeMemorySource.value == ActiveMemorySource.NOW) {
+            runCatching {
+                val saved = memoryRepository.saveOverride(entry)
+                nowRepository.replaceEntry(saved)
+            }.onFailure { error ->
+                nowRepository.reportError(error.message ?: "Unable to save NOW memory")
+            }
+        } else {
+            memoryRepository.update(entry)
+        }
+    }
 
+    fun deleteMemory(id: Long) {
+        if (activeMemorySource.value == ActiveMemorySource.NOW) {
+            nowRepository.reportError("Temporary NOW memories cannot be deleted")
+        } else {
+            memoryRepository.delete(id)
+        }
+    }
+
+    fun loadNowSource() = launchNowOperation {
+        stopMemoryScan()
+        nowRepository.loadNow()
+    }
+
+    fun loadCuratedSource() = launchNowOperation {
+        stopMemoryScan()
+        nowRepository.loadCurated()
+        memoryRepository.refreshSources("CURATED SOURCES LOADED")
+    }
+
+    fun refreshNowSource() = launchNowOperation {
+        nowRepository.refresh()
+        if (nowRepository.activeSource.value == ActiveMemorySource.NOW) {
+            nowRepository.loadNow()
+        }
+    }
 
     fun selectFrequencyDirectory(uri: Uri) = launchSourceOperation {
         memoryRepository.selectDirectory(uri)
@@ -195,6 +273,14 @@ class MainViewModel(
         viewModelScope.launch(Dispatchers.IO) { runSourceOperation(block) }
     }
 
+    private fun launchNowOperation(block: () -> Unit) {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching(block).onFailure { error ->
+                nowRepository.reportError(error.message ?: "NOW source error")
+            }
+        }
+    }
+
     private fun runSourceOperation(block: () -> Unit) {
         runCatching(block).onFailure { error ->
             memoryRepository.reportSourceError(error.message ?: "Frequency source error")
@@ -212,12 +298,13 @@ class MainViewModel(
         fun factory(
             repository: RadioRepository,
             memoryRepository: MemoryRepository,
+            nowRepository: NowRepository,
         ): ViewModelProvider.Factory =
             object : ViewModelProvider.Factory {
                 @Suppress("UNCHECKED_CAST")
                 override fun <T : ViewModel> create(modelClass: Class<T>): T {
                     require(modelClass.isAssignableFrom(MainViewModel::class.java))
-                    return MainViewModel(repository, memoryRepository) as T
+                    return MainViewModel(repository, memoryRepository, nowRepository) as T
                 }
             }
     }

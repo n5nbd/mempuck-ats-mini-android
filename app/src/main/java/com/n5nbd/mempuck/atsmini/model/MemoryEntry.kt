@@ -23,9 +23,17 @@ fun memoryTagTokens(tags: String): List<String> = tags
     .trim()
     .split(MEMORY_TAG_SEPARATOR)
     .asSequence()
-    .map { token -> token.trim().trimStart('#') }
+    .map(String::trim)
     .filter(String::isNotEmpty)
-    .map { token -> "#${token.uppercase(Locale.ROOT)}" }
+    .mapNotNull { token ->
+        val prefix = if (token.startsWith('$')) '$' else '#'
+        val body = token.trimStart('#', '$')
+            .trim()
+            .uppercase(Locale.ROOT)
+            .takeIf(String::isNotEmpty)
+            ?: return@mapNotNull null
+        "$prefix$body"
+    }
     .distinct()
     .toList()
 

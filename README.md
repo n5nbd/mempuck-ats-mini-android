@@ -2,27 +2,28 @@
 
 MemPuck for ATS Mini is a BLE controller and authoritative VFO/memory system for the ATS Mini receiver. It keeps the working MemPuck interface and adds a local, tagged frequency library without making ATS numbered memories part of the normal workflow.
 
-This repository currently contains the **v0.31.0-dev31 scan-dwell and CFG cosmetics checkpoint**.
+This repository contains the **v0.35.0 field-test release**, the final public testing checkpoint planned before v1.0. It combines the NOW EiBi source, dual stock/FAST firmware support, confirmed scan dwell, remembered-radio reconnect, the tagged memory library, and the final header/source-page cleanup. Both firmware paths have been exercised on a Pixel 6 and ATS Mini V4.
 
 ## What it does
 
 - Discovers and connects to an ATS Mini in Bluetooth LE Ad hoc mode.
 - Remembers the last capability-verified receiver and attempts to reconnect to it on a fresh app launch.
 - Shows a MemPuck splash/about screen while the saved receiver is located, connected, and capability-verified.
-- Detects the patched receiver through the `Z?` capability query.
-- Tunes the receiver with absolute frequency and mode commands.
+- Probes for the MemPuck `Z` extension, then falls back automatically to compatible stock ATS Mini firmware.
+- Tunes through atomic `Z` commands when available or verified stock `B`/`M`/`F` transactions otherwise.
 - Provides direct frequency entry, digit controls, VFO stepping, scanning, and volume control.
 - Maintains a local memory library with names, notes, tags, favorite state, and scan-skip state.
 - Filters memories with a tag cloud, optional favorite subset, and AND/OR matching.
 - Steps manually through all matching memories and scans only matching memories that are not marked `SKIP`.
 - Imports, exports, and manages JSON frequency packs in a user-selected Android Files directory.
 - Preserves pack files and writes user-created entries, edits, overrides, and deletions to `USER.json`.
+- Downloads and caches the EiBi schedule on demand, then generates ordinary tagged memories for broadcasts active at the current UTC time.
 
 ATS numbered memories are not authoritative and are not currently copied or synchronized by the app.
 
 ## Hardware and firmware
 
-The hardware-tested development combination is:
+The hardware-tested development combination remains:
 
 - Google Pixel 6
 - ATS Mini V4
@@ -30,12 +31,12 @@ The hardware-tested development combination is:
 - Firmware feature tag `ats-mini-cat-v003-r2-absolute-tune`
 - Firmware build profile `esp32s3-ospi`
 
-The receiver must answer:
+v0.35.0 accepts either of these receiver protocols:
 
-```text
-Z?
-OK,Z,1
-```
+1. **MemPuck absolute tuning:** `Z?` returns `OK,Z,1`; the app uses one atomic `Z<frequency>,<mode>` command.
+2. **Official stock firmware v2.34 or newer:** if `Z?` is unanswered or rejected, the app reads the live status stream, selects `ALL` or `VHF` with verified band bumps, selects the hardware mode with verified mode bumps, and sends the stock `F<frequency>` command.
+
+Both tuning paths have passed Pixel 6 / ATS Mini V4 field testing. Stock tuning is slower when it must change band or restore SSB, while the atomic `Z` path remains noticeably faster. Firmware older than v2.34 does not provide the required `F` command.
 
 During development, configure the receiver as follows:
 
@@ -61,8 +62,9 @@ The stock ATS protocol exposes relative `V` and `v` volume commands. MemPuck cal
 The portrait interface follows the established MemPuck design rather than a general SDR layout:
 
 - `RADIO` — live receiver control, VFO/MEM operation, direct entry, scanning, and volume
-- `LIST` — filtered local memory library and editor access
-- `SRC` — frequency-directory, pack, template, import, export, and delete tools
+- `LIST` — filtered memories from whichever source is currently loaded
+- `NOW` — manual EiBi download/cache controls and the `LOAD NOW` source switch
+- `SRC` — curated frequency-directory tools and the `LOAD SRC` source switch
 - `CFG` — radio link, display theme, tuning steps, shared scan dwell, debug log, and about information
 
 Themes:
@@ -73,7 +75,7 @@ Themes:
 
 The status bar remains black on every page. While connected, the app keeps the display session alive, dims after inactivity, restores brightness on touch, and restores normal Android sleep behavior after disconnect.
 
-The VFO and memory scanners share one persistent dwell setting with 1, 2, 5, and 10 second choices; 2 seconds is the default.
+The VFO and memory scanners share one persistent dwell setting with 1, 2, 5, and 10 second choices; 2 seconds is the default. The dwell is listener decision time: its clock begins only after the receiver confirms the requested band, mode, and frequency.
 
 ## Memory behavior
 
@@ -87,6 +89,8 @@ MemPuck allows one active record per normalized frequency.
 - `SKIP` does not hide a memory and does not prevent manual stepping; it is consulted only by memory scanning.
 - MEM single arrows step through every memory in the active filtered result.
 - MEM double arrows scan the same result after removing `SKIP` entries.
+
+When NOW is loaded, LIST contains temporary AM memories generated from currently active EiBi broadcast records. NOW records retain the normal filter, tune, step, scan, and editor behavior, but the one-tap `FAV`, `SKIP`, and delete controls are hidden. Saving through the editor deliberately creates a permanent `USER.json` override. Loading SRC restores the ordinary `USER.json` plus curated-pack view.
 
 See [Frequency packs and USER.json](docs/FREQUENCY_PACKS.md) for storage and file precedence.
 
@@ -133,11 +137,13 @@ See [Development workflow](docs/DEVELOPMENT.md) for the repository conventions a
 
 ## Current limitations and planned work
 
+- EiBi refresh is manual; NOW has no background refresh, alarm, notification, or automatic timed-tuning behavior.
 - The curated-pack download flow from GitHub is not implemented yet; packs are imported from local files.
 - ATS numbered-memory copy is not implemented and will remain optional.
 - Native ATS CW handling is not part of the proven firmware checkpoint; MemPuck maps CW to USB.
 - The ATS Mini limits broadcast-FM tuning to 10 kHz resolution.
 - Absolute volume is not available in the proven ATS firmware.
+- Stock-protocol tuning is status-driven and can take longer than the atomic `Z` path when the receiver starts on an unrelated band.
 
 MemPuck for ATS Mini is intended to remain focused on the ATS Mini rather than grow into a general SDR suite.
 

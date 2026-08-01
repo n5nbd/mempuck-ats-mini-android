@@ -13,10 +13,18 @@ sealed interface LinkState {
     data class Failed(val message: String) : LinkState
 }
 
+enum class TuningProtocol {
+    AbsoluteZ,
+    LegacyAdHoc,
+}
+
 sealed interface CapabilityState {
     data object NotChecked : CapabilityState
     data object Checking : CapabilityState
-    data class Supported(val version: Int) : CapabilityState
+    data class Supported(
+        val protocol: TuningProtocol,
+        val version: Int,
+    ) : CapabilityState
     data class Unsupported(val detail: String) : CapabilityState
 }
 

@@ -95,7 +95,7 @@ object FrequencyPackCodec {
                 .put("Save a copy under a new .json filename before filling it in.")
                 .put("frequencyHz is an integer frequency in hertz.")
                 .put("mode is LSB, USB, CW, AM, or FM.")
-                .put("tags are space-separated and will be normalized to uppercase #TAGS.")
+                .put("tags are space-separated. #TAGS are general tags and \$LANGUAGE marks language.")
                 .put("favorite and skip are true or false."),
         )
         .put(

@@ -6,15 +6,15 @@ Current public field-test checkpoint:
 
 ```text
 Branch: main
-Tag: mempuck-ats-mini-android-v031-field-test
+Tag: mempuck-ats-mini-android-v035-field-test
 ```
 
-Application identity:
+The current public field-test release is:
 
 ```text
 Package: com.n5nbd.mempuck.atsmini
-Version: 0.31.0-dev31
-Version code: 31
+Version: 0.35.0
+Version code: 35
 Minimum Android SDK: 26
 Compile/target SDK: 36
 JVM toolchain: 17
@@ -62,26 +62,30 @@ After a successful build:
 
 ```bash
 cp app/build/outputs/apk/debug/app-debug.apk \
-  ~/Downloads/mempuck-ats-mini-android-v031-field-test.apk
+  ~/Downloads/mempuck-ats-mini-android-v035-field-test.apk
 
-sha256sum ~/Downloads/mempuck-ats-mini-android-v031-field-test.apk
+sha256sum ~/Downloads/mempuck-ats-mini-android-v033-dual-protocol-candidate.apk
 ```
 
 ## Receiver setup
 
-Use the patched ATS Mini firmware and keep the receiver awake during development:
+Keep the receiver awake during development:
 
 ```text
 Settings -> Bluetooth -> Ad hoc
 Sleep mode -> Unlocked
 ```
 
-The app requires the Nordic UART service and confirms patched-firmware support with:
+The app requires the Nordic UART service. It first probes the optional MemPuck extension:
 
 ```text
 Z?
 OK,Z,1
 ```
+
+If that response is absent, it enables or observes the stock 500 ms status monitor and accepts official firmware v2.34 or newer. Stock tuning is performed as a verified transaction: select `ALL` or `VHF` with `B`/`b`, select AM/LSB/USB with `M`/`m`, then send `F<frequency>\r`.
+
+Use [the dual-protocol field-test checklist](STOCK_FIRMWARE_TEST_PLAN.md) before tagging this checkpoint.
 
 ## Development boundaries
 

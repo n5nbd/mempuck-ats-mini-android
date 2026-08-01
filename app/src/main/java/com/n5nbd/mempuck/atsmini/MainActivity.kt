@@ -118,6 +118,7 @@ class MainActivity : ComponentActivity() {
                 factory = MainViewModel.factory(
                     app.radioRepository,
                     app.memoryRepository,
+                    app.nowRepository,
                 ),
             )
 

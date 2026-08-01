@@ -1,5 +1,60 @@
 # Changelog
 
+## 0.35.0 — final pre-1.0 field-test release (2026-08-01)
+
+- Changed the header subtitle from `ATS Mini Radio Controller` to `Memory Manager`.
+- Combined connection and firmware capability into one compact line: `ONLINE:STOCK`, `ONLINE:FAST`, `OFFLINE:STOCK`, or `OFFLINE:FAST`.
+- Retained the last verified capability after disconnect so the offline header remains informative, and aligned the main offline prompt with the same wording.
+- Removed the unexplained source-directory prose and rendered the selected directory as a path-like value such as `/MemPuck`.
+- Promoted the hardware-tested tree to the final public field-test checkpoint before v1.0.
+- Updated application metadata to version `0.35.0`, version code `35`.
+
+## 0.34.0-dev34 — confirmed scan dwell and NOW wording (2026-08-01)
+
+- Changed VFO and memory scanning so the configured dwell begins only after the
+  receiver confirms the requested band, mode, and frequency. Slow stock-firmware
+  transitions no longer consume the listener's decision window.
+- Kept the atomic `Z` path fast while allowing stock `B/M/F` scans to take the
+  extra transition time they actually require.
+- Removed `ORDINARY` from the NOW-page explanation.
+- Renamed the NOW cache timestamp label from `DOWNLOADED` to `REFRESHED`.
+- Updated application metadata to version `0.34.0-dev34`, version code `34`.
+
+## 0.33.0-dev33 — dual Z and stock-firmware tuning (2026-08-01)
+
+- Kept the proven atomic `Z` tuning path for receivers running the MemPuck firmware extension.
+- Added automatic fallback when `Z?` is unanswered or rejected: official ATS Mini firmware v2.34 or newer is recognized from its live status record.
+- Added a status-verified stock tuning transaction that selects `ALL` or `VHF`, selects AM/LSB/USB as required, and then sends the stock `F<frequency>` command.
+- Preserved logical CW as a MemPuck mode while using USB as the ATS hardware mode on both protocol paths.
+- Added command retry limits, delayed-status protection, full tune timeout handling, and startup auto-connect acceptance for compatible stock receivers.
+- Added protocol-state labels so RADIO and CFG identify `Z` versus `STOCK` tuning.
+- Added unit coverage for HF, FM, CW, relative band/mode selection, delayed monitor records, and stock `F` command formatting.
+- Updated application metadata to version `0.33.0-dev33`, version code `33`.
+
+## 0.32.0-dev32 — NOW dynamic EiBi source (2026-07-31)
+
+- Added the top-level `NOW` source page and a persisted application source state
+  that switches LIST between curated memories and generated live broadcasts.
+- Added manual HTTP download, private caching, validation, and local parsing of
+  the EiBi frequency schedule. A failed update preserves the previous cache.
+- Generated ordinary AM `MemoryEntry` records for broadcasts active at the
+  current UTC time, including weekday and overnight schedule handling.
+- Limited NOW to the shortwave portion of EiBi and excluded recognizable
+  utility, jammer, and digital-service records that are not listenable AM programming.
+- Added compact band tags, three-letter country tags, and distinct `$LANGUAGE`
+  tags from available EiBi metadata. Target and site details remain in notes.
+  Multiple simultaneous stations on one frequency are combined into one
+  frequency-keyed memory.
+- Reused LIST expansion, filtering, tuning, MEM stepping, scanning, and editing
+  for NOW records.
+- Hid one-tap `FAV`, `SKIP`, and delete controls while NOW is loaded. An explicit
+  editor save writes a permanent override to `USER.json`.
+- Added `LOAD NOW` and `LOAD SRC` controls without modifying either underlying
+  source, and regenerate a persisted NOW state from cache on fresh launch.
+- Centered the portrait-first interface at a maximum content width on wider
+  displays.
+- Updated application metadata to version `0.32.0-dev32`, version code `32`.
+
 ## 0.31.0-dev31 — practical scan dwell and CFG cosmetics (2026-07-31)
 
 - Replaced the scan dwell choices with 1, 2, 5, and 10 seconds.

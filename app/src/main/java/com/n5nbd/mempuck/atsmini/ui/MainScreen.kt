@@ -21,12 +21,14 @@ import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.statusBars
@@ -79,6 +81,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.n5nbd.mempuck.atsmini.BuildConfig
+import com.n5nbd.mempuck.atsmini.model.ActiveMemorySource
 import com.n5nbd.mempuck.atsmini.model.AtsFrequencyPlan
 import com.n5nbd.mempuck.atsmini.model.AtsFrequencyRegion
 import com.n5nbd.mempuck.atsmini.model.CapabilityState
@@ -86,13 +89,18 @@ import com.n5nbd.mempuck.atsmini.model.FrequencySourceFile
 import com.n5nbd.mempuck.atsmini.model.FrequencySourceState
 import com.n5nbd.mempuck.atsmini.model.LinkState
 import com.n5nbd.mempuck.atsmini.model.MemoryEntry
+import com.n5nbd.mempuck.atsmini.model.NowSourceState
 import com.n5nbd.mempuck.atsmini.model.memoryTagTokens
 import com.n5nbd.mempuck.atsmini.model.RadioMode
 import com.n5nbd.mempuck.atsmini.model.RadioSnapshot
 import com.n5nbd.mempuck.atsmini.model.StatusStreamState
 import com.n5nbd.mempuck.atsmini.model.StartupReconnectStage
 import com.n5nbd.mempuck.atsmini.model.TuneState
+import com.n5nbd.mempuck.atsmini.model.TuningProtocol
 import kotlinx.coroutines.delay
+import java.time.Instant
+import java.time.ZoneOffset
+import java.time.format.DateTimeFormatter
 import kotlin.math.abs
 import kotlin.math.roundToInt
 
@@ -152,9 +160,10 @@ private enum class ConfigSection {
 }
 
 private enum class AppTab(val label: String) {
-    Radio("RADIO"),
-    List("LIST"),
+    Radio("RIG"),
+    List("LST"),
     Source("SRC"),
+    Now("NOW"),
     Config("CFG"),
 }
 
@@ -220,6 +229,8 @@ fun MainScreen(
     val state by viewModel.state.collectAsStateWithLifecycle()
     val memories by viewModel.memories.collectAsStateWithLifecycle()
     val frequencySources by viewModel.frequencySources.collectAsStateWithLifecycle()
+    val activeMemorySource by viewModel.activeMemorySource.collectAsStateWithLifecycle()
+    val nowSource by viewModel.nowSource.collectAsStateWithLifecycle()
     val memoryScanDirection by viewModel.memoryScanDirection.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableStateOf(AppTab.Radio) }
     var memoryMode by rememberSaveable { mutableStateOf(false) }
@@ -237,11 +248,13 @@ fun MainScreen(
         .map(String::trim)
         .filter(String::isNotEmpty)
         .toSet()
+    val effectiveFavoriteMemorySelected =
+        favoriteMemorySelected && activeMemorySource == ActiveMemorySource.CURATED
     val visibleMemories = memories.filter { entry ->
         memoryMatchesFilters(
             entry = entry,
             selectedTags = selectedMemoryTags,
-            favoriteSelected = favoriteMemorySelected,
+            favoriteSelected = effectiveFavoriteMemorySelected,
             matchAll = memoryMatchAll,
         )
     }
@@ -315,108 +328,128 @@ fun MainScreen(
                         colors = colors,
                     )
                 } else {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .verticalScroll(rememberScrollState())
-                            .padding(8.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.TopCenter,
                     ) {
-                        Header(
-                        state = state,
-                        selectedTab = tab,
-                        colors = colors,
-                        onTabSelected = { tab = it },
-                    )
+                        Column(
+                            modifier = Modifier
+                                .fillMaxHeight()
+                                .widthIn(max = 560.dp)
+                                .fillMaxWidth()
+                                .verticalScroll(rememberScrollState())
+                                .padding(8.dp),
+                            verticalArrangement = Arrangement.spacedBy(10.dp),
+                        ) {
+                            Header(
+                                state = state,
+                                selectedTab = tab,
+                                colors = colors,
+                                onTabSelected = { tab = it },
+                            )
 
-                    when (tab) {
-                        AppTab.Radio -> RadioScreen(
-                            state = state,
-                            memories = memories,
-                            visibleMemories = visibleMemories,
-                            memoryMode = memoryMode,
-                            onMemoryModeChanged = { memoryMode = it },
-                            colors = colors,
-                            tuneFrequency = viewModel::tuneFrequency,
-                            selectLowBandMode = viewModel::selectLowBandMode,
-                            startVfoScan = viewModel::startVfoScan,
-                            memoryScanDirection = memoryScanDirection,
-                            stepMemory = { direction ->
-                                viewModel.stepMemory(direction, visibleMemoryIds)
-                            },
-                            startMemoryScan = { direction ->
-                                viewModel.startMemoryScan(direction, visibleMemoryIds)
-                            },
-                            stopTuneScan = viewModel::stopTuneScan,
-                            vhfVfoStep = vhfVfoStep,
-                            hfVfoSmallStep = hfVfoSmallStep,
-                            hfVfoLargeStep = hfVfoLargeStep,
-                            setVolume = viewModel::setVolume,
-                            createMemory = viewModel::createMemory,
-                            updateMemory = viewModel::updateMemory,
-                            deleteMemory = viewModel::deleteMemory,
-                            openConfigAndScan = {
-                                tab = AppTab.Config
-                                if (permissionsGranted) {
-                                    viewModel.startScan()
-                                } else {
-                                    scanAfterPermission = true
-                                    requestPermissions()
-                                }
-                            },
-                        )
-                        AppTab.List -> MemoryListScreen(
-                            memories = memories,
-                            selectedTags = selectedMemoryTags,
-                            favoriteSelected = favoriteMemorySelected,
-                            matchAll = memoryMatchAll,
-                            colors = colors,
-                            onSelectedTagsChanged = ::setSelectedMemoryTags,
-                            onFavoriteSelectedChanged = { favoriteMemorySelected = it },
-                            onMatchAllChanged = { memoryMatchAll = it },
-                            onLoadInMemoryMode = { entry ->
-                                viewModel.recallMemory(entry)
-                                memoryMode = true
-                                tab = AppTab.Radio
-                            },
-                            updateMemory = viewModel::updateMemory,
-                            deleteMemory = viewModel::deleteMemory,
-                        )
-                        AppTab.Source -> SourceScreen(
-                            state = frequencySources,
-                            colors = colors,
-                            selectDirectory = viewModel::selectFrequencyDirectory,
-                            refresh = viewModel::refreshFrequencySources,
-                            downloadTemplate = viewModel::downloadFrequencyTemplate,
-                            importPack = viewModel::importFrequencyPack,
-                            exportFile = viewModel::exportFrequencyFile,
-                            deleteFile = viewModel::deleteFrequencyFile,
-                        )
-                        AppTab.Config -> ConfigScreen(
-                            state = state,
-                            colors = colors,
-                            permissionsGranted = permissionsGranted,
-                            requestPermissions = requestPermissions,
-                            themeChoice = themeChoice,
-                            onThemeChoice = onThemeChoice,
-                            hueDegrees = hueDegrees,
-                            onHueDegrees = onHueDegrees,
-                            vhfVfoStep = vhfVfoStep,
-                            onVhfVfoStep = onVhfVfoStep,
-                            hfVfoSmallStep = hfVfoSmallStep,
-                            onHfVfoSmallStep = onHfVfoSmallStep,
-                            hfVfoLargeStep = hfVfoLargeStep,
-                            onHfVfoLargeStep = onHfVfoLargeStep,
-                            scanDwell = scanDwell,
-                            onScanDwell = onScanDwell,
-                            startScan = viewModel::startScan,
-                            stopScan = viewModel::stopScan,
-                            disconnect = viewModel::disconnect,
-                            probeCapability = viewModel::probeCapability,
-                            connect = viewModel::connect,
-                        )
+                            when (tab) {
+                                AppTab.Radio -> RadioScreen(
+                                    state = state,
+                                    memories = memories,
+                                    visibleMemories = visibleMemories,
+                                    memoryMode = memoryMode,
+                                    onMemoryModeChanged = { memoryMode = it },
+                                    colors = colors,
+                                    tuneFrequency = viewModel::tuneFrequency,
+                                    selectLowBandMode = viewModel::selectLowBandMode,
+                                    startVfoScan = viewModel::startVfoScan,
+                                    memoryScanDirection = memoryScanDirection,
+                                    stepMemory = { direction ->
+                                        viewModel.stepMemory(direction, visibleMemoryIds)
+                                    },
+                                    startMemoryScan = { direction ->
+                                        viewModel.startMemoryScan(direction, visibleMemoryIds)
+                                    },
+                                    stopTuneScan = viewModel::stopTuneScan,
+                                    vhfVfoStep = vhfVfoStep,
+                                    hfVfoSmallStep = hfVfoSmallStep,
+                                    hfVfoLargeStep = hfVfoLargeStep,
+                                    setVolume = viewModel::setVolume,
+                                    createMemory = viewModel::createMemory,
+                                    updateMemory = viewModel::updateMemory,
+                                    deleteMemory = viewModel::deleteMemory,
+                                    temporarySource = activeMemorySource == ActiveMemorySource.NOW,
+                                    temporarySaveAvailable = frequencySources.directorySelected,
+                                    openConfigAndScan = {
+                                        tab = AppTab.Config
+                                        if (permissionsGranted) {
+                                            viewModel.startScan()
+                                        } else {
+                                            scanAfterPermission = true
+                                            requestPermissions()
+                                        }
+                                    },
+                                )
+                                AppTab.List -> MemoryListScreen(
+                                    memories = memories,
+                                    selectedTags = selectedMemoryTags,
+                                    favoriteSelected = favoriteMemorySelected,
+                                    matchAll = memoryMatchAll,
+                                    colors = colors,
+                                    onSelectedTagsChanged = ::setSelectedMemoryTags,
+                                    onFavoriteSelectedChanged = { favoriteMemorySelected = it },
+                                    onMatchAllChanged = { memoryMatchAll = it },
+                                    onLoadInMemoryMode = { entry ->
+                                        viewModel.recallMemory(entry)
+                                        memoryMode = true
+                                        tab = AppTab.Radio
+                                    },
+                                    updateMemory = viewModel::updateMemory,
+                                    deleteMemory = viewModel::deleteMemory,
+                                    temporarySource = activeMemorySource == ActiveMemorySource.NOW,
+                                    temporarySaveAvailable = frequencySources.directorySelected,
+                                )
+                                AppTab.Now -> NowScreen(
+                                    state = nowSource,
+                                    activeSource = activeMemorySource,
+                                    colors = colors,
+                                    refresh = viewModel::refreshNowSource,
+                                    loadNow = viewModel::loadNowSource,
+                                )
+                                AppTab.Source -> SourceScreen(
+                                    state = frequencySources,
+                                    activeSource = activeMemorySource,
+                                    colors = colors,
+                                    loadCurated = viewModel::loadCuratedSource,
+                                    selectDirectory = viewModel::selectFrequencyDirectory,
+                                    refresh = viewModel::refreshFrequencySources,
+                                    downloadTemplate = viewModel::downloadFrequencyTemplate,
+                                    importPack = viewModel::importFrequencyPack,
+                                    exportFile = viewModel::exportFrequencyFile,
+                                    deleteFile = viewModel::deleteFrequencyFile,
+                                )
+                                AppTab.Config -> ConfigScreen(
+                                    state = state,
+                                    colors = colors,
+                                    permissionsGranted = permissionsGranted,
+                                    requestPermissions = requestPermissions,
+                                    themeChoice = themeChoice,
+                                    onThemeChoice = onThemeChoice,
+                                    hueDegrees = hueDegrees,
+                                    onHueDegrees = onHueDegrees,
+                                    vhfVfoStep = vhfVfoStep,
+                                    onVhfVfoStep = onVhfVfoStep,
+                                    hfVfoSmallStep = hfVfoSmallStep,
+                                    onHfVfoSmallStep = onHfVfoSmallStep,
+                                    hfVfoLargeStep = hfVfoLargeStep,
+                                    onHfVfoLargeStep = onHfVfoLargeStep,
+                                    scanDwell = scanDwell,
+                                    onScanDwell = onScanDwell,
+                                    startScan = viewModel::startScan,
+                                    stopScan = viewModel::stopScan,
+                                    disconnect = viewModel::disconnect,
+                                    probeCapability = viewModel::probeCapability,
+                                    connect = viewModel::connect,
+                                )
+                            }
+                        }
                     }
-                }
                 }
             }
 
@@ -451,21 +484,24 @@ private fun Header(
                     letterSpacing = 1.5.sp,
                 )
                 Text(
-                    text = "ATS Mini Radio Controller",
+                    text = "Memory Manager",
                     fontSize = 16.sp,
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(
-                    text = "ATS MINI",
+                    text = "ATS Mini",
                     fontSize = 23.sp,
                     fontWeight = FontWeight.Black,
                     letterSpacing = 1.sp,
                 )
                 Text(
-                    text = headerLinkText(state),
+                    text = headerReceiverStateText(state),
                     fontSize = 14.sp,
+                    fontFamily = FontFamily.Monospace,
+                    fontWeight = FontWeight.Bold,
                     color = colors.muted,
+                    maxLines = 1,
                 )
             }
         }
@@ -484,6 +520,8 @@ private fun Header(
                     onClick = { onTabSelected(tab) },
                     modifier = Modifier.weight(1f),
                     height = 41.dp,
+                    fontSize = 13.sp,
+                    horizontalPadding = 4.dp,
                 )
             }
         }
@@ -512,6 +550,8 @@ private fun RadioScreen(
     createMemory: (Long, RadioMode, String, String, String, Boolean, Boolean) -> Unit,
     updateMemory: (MemoryEntry) -> Unit,
     deleteMemory: (Long) -> Unit,
+    temporarySource: Boolean,
+    temporarySaveAvailable: Boolean,
     openConfigAndScan: () -> Unit,
 ) {
     var memoryEditorVisible by rememberSaveable { mutableStateOf(false) }
@@ -545,11 +585,7 @@ private fun RadioScreen(
     }
 
     PuckPanel(colors = colors) {
-        Text(
-            text = "FREQUENCY",
-            fontSize = 21.sp,
-            fontWeight = FontWeight.Black,
-        )
+        FrequencyTitle(colors = colors)
 
         Spacer(Modifier.height(18.dp))
 
@@ -698,6 +734,8 @@ private fun RadioScreen(
             existing = memories.firstOrNull { it.id == editingMemoryId },
             allMemories = memories,
             colors = colors,
+            temporarySource = temporarySource && editingMemoryId != null,
+            temporarySaveAvailable = temporarySaveAvailable,
             onDismiss = {
                 memoryEditorVisible = false
                 editingMemoryId = null
@@ -734,17 +772,20 @@ private fun MemoryListScreen(
     onLoadInMemoryMode: (MemoryEntry) -> Unit,
     updateMemory: (MemoryEntry) -> Unit,
     deleteMemory: (Long) -> Unit,
+    temporarySource: Boolean,
+    temporarySaveAvailable: Boolean,
 ) {
     var expandedMemoryId by rememberSaveable { mutableStateOf<Long?>(null) }
     var editingMemoryId by rememberSaveable { mutableStateOf<Long?>(null) }
 
     val availableTags = memoryTagCloud(memories)
 
+    val effectiveFavoriteSelected = favoriteSelected && !temporarySource
     val visibleMemories = memories.filter { entry ->
         memoryMatchesFilters(
             entry = entry,
             selectedTags = selectedTags,
-            favoriteSelected = favoriteSelected,
+            favoriteSelected = effectiveFavoriteSelected,
             matchAll = matchAll,
         )
     }
@@ -762,7 +803,7 @@ private fun MemoryListScreen(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(
-                text = "MEMORY FILTER",
+                text = if (temporarySource) "NOW FILTER" else "MEMORY FILTER",
                 fontSize = 21.sp,
                 fontWeight = FontWeight.Black,
             )
@@ -789,15 +830,17 @@ private fun MemoryListScreen(
                     expandedMemoryId = null
                 },
             )
-            MemoryTagChip(
-                text = "FAV",
-                selected = favoriteSelected,
-                colors = colors,
-                onClick = {
-                    onFavoriteSelectedChanged(!favoriteSelected)
-                    expandedMemoryId = null
-                },
-            )
+            if (!temporarySource) {
+                MemoryTagChip(
+                    text = "FAV",
+                    selected = favoriteSelected,
+                    colors = colors,
+                    onClick = {
+                        onFavoriteSelectedChanged(!favoriteSelected)
+                        expandedMemoryId = null
+                    },
+                )
+            }
             MemoryTagChip(
                 text = if (matchAll) "AND" else "OR",
                 selected = true,
@@ -830,13 +873,13 @@ private fun MemoryListScreen(
     if (memories.isEmpty()) {
         PuckPanel(colors = colors) {
             Text(
-                text = "NO MEMORIES YET.",
+                text = if (temporarySource) "NO ACTIVE EIBI FREQUENCIES." else "NO MEMORIES YET.",
                 fontSize = 18.sp,
                 fontWeight = FontWeight.Black,
             )
             Spacer(Modifier.height(5.dp))
             Text(
-                text = "DOUBLE-TAP THE RADIO INFORMATION PANEL TO CREATE ONE.",
+                text = if (temporarySource) "RETURN TO NOW AND LOAD THE CURRENT UTC LIST." else "DOUBLE-TAP THE RADIO INFORMATION PANEL TO CREATE ONE.",
                 color = colors.muted,
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
@@ -856,6 +899,7 @@ private fun MemoryListScreen(
                 entry = entry,
                 expanded = expandedMemoryId == entry.id,
                 colors = colors,
+                showPersistentControls = !temporarySource,
                 onToggleExpanded = {
                     expandedMemoryId = if (expandedMemoryId == entry.id) null else entry.id
                 },
@@ -879,6 +923,8 @@ private fun MemoryListScreen(
             existing = editingMemory,
             allMemories = memories,
             colors = colors,
+            temporarySource = temporarySource,
+            temporarySaveAvailable = temporarySaveAvailable,
             onDismiss = { editingMemoryId = null },
             onCreate = { _, _, _, _, _, _, _ -> Unit },
             onUpdate = { entry ->
@@ -921,6 +967,7 @@ private fun MemoryListRow(
     entry: MemoryEntry,
     expanded: Boolean,
     colors: PuckColors,
+    showPersistentControls: Boolean,
     onToggleExpanded: () -> Unit,
     onLoadInMemoryMode: () -> Unit,
     onToggleFavorite: () -> Unit,
@@ -982,24 +1029,26 @@ private fun MemoryListRow(
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                PuckButton(
-                    text = "FAV",
-                    selected = entry.favorite,
-                    colors = colors,
-                    onClick = onToggleFavorite,
-                    horizontalPadding = 12.dp,
-                    height = 42.dp,
-                    fontSize = 14.sp,
-                )
-                PuckButton(
-                    text = "SKIP",
-                    selected = entry.skip,
-                    colors = colors,
-                    onClick = onToggleSkip,
-                    horizontalPadding = 12.dp,
-                    height = 42.dp,
-                    fontSize = 14.sp,
-                )
+                if (showPersistentControls) {
+                    PuckButton(
+                        text = "FAV",
+                        selected = entry.favorite,
+                        colors = colors,
+                        onClick = onToggleFavorite,
+                        horizontalPadding = 12.dp,
+                        height = 42.dp,
+                        fontSize = 14.sp,
+                    )
+                    PuckButton(
+                        text = "SKIP",
+                        selected = entry.skip,
+                        colors = colors,
+                        onClick = onToggleSkip,
+                        horizontalPadding = 12.dp,
+                        height = 42.dp,
+                        fontSize = 14.sp,
+                    )
+                }
                 PuckButton(
                     text = "EDIT",
                     colors = colors,
@@ -1575,6 +1624,8 @@ private fun MemoryEditorDialog(
     existing: MemoryEntry?,
     allMemories: List<MemoryEntry>,
     colors: PuckColors,
+    temporarySource: Boolean = false,
+    temporarySaveAvailable: Boolean = true,
     onDismiss: () -> Unit,
     onCreate: (Long, RadioMode, String, String, String, Boolean, Boolean) -> Unit,
     onUpdate: (MemoryEntry) -> Unit,
@@ -1608,7 +1659,8 @@ private fun MemoryEditorDialog(
         region != AtsFrequencyRegion.Unsupported &&
         validMode &&
         name.isNotBlank() &&
-        !duplicateFrequency
+        !duplicateFrequency &&
+        (!temporarySource || temporarySaveAvailable)
 
     fun updateFrequency(input: String) {
         frequencyText = input.filter { it.isDigit() || it == '.' || it == ',' || it == ' ' }
@@ -1654,41 +1706,58 @@ private fun MemoryEditorDialog(
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Text(
-                text = if (existing == null) "CREATE MEMORY" else "EDIT MEMORY",
+                text = when {
+                    temporarySource -> "SAVE NOW MEMORY"
+                    existing == null -> "CREATE MEMORY"
+                    else -> "EDIT MEMORY"
+                },
                 color = colors.foreground,
                 fontSize = 20.sp,
                 fontWeight = FontWeight.Black,
             )
 
-            MemoryEditorField(
-                label = "FREQUENCY",
-                value = frequencyText,
-                colors = colors,
-                keyboardType = KeyboardType.Decimal,
-                onValueChange = ::updateFrequency,
-            )
+            if (temporarySource) {
+                MemoryListDetail(
+                    label = "FREQ",
+                    value = formatFrequencyHz(initialFrequency),
+                    colors = colors,
+                )
+                MemoryListDetail(
+                    label = "MODE",
+                    value = initialMode.label,
+                    colors = colors,
+                )
+            } else {
+                MemoryEditorField(
+                    label = "FREQUENCY",
+                    value = frequencyText,
+                    colors = colors,
+                    keyboardType = KeyboardType.Decimal,
+                    onValueChange = ::updateFrequency,
+                )
 
-            Text("MODE", fontSize = 13.sp, fontWeight = FontWeight.Black)
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                val modes = if (region == AtsFrequencyRegion.BroadcastFm) {
-                    listOf(RadioMode.FM)
-                } else {
-                    LOW_BAND_MODES
-                }
-                modes.forEach { candidate ->
-                    PuckButton(
-                        text = candidate.label,
-                        selected = mode == candidate,
-                        colors = colors,
-                        enabled = region != null && region != AtsFrequencyRegion.Unsupported,
-                        onClick = { mode = candidate },
-                        modifier = Modifier.weight(1f),
-                        height = 44.dp,
-                        fontSize = 14.sp,
-                    )
+                Text("MODE", fontSize = 13.sp, fontWeight = FontWeight.Black)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    val modes = if (region == AtsFrequencyRegion.BroadcastFm) {
+                        listOf(RadioMode.FM)
+                    } else {
+                        LOW_BAND_MODES
+                    }
+                    modes.forEach { candidate ->
+                        PuckButton(
+                            text = candidate.label,
+                            selected = mode == candidate,
+                            colors = colors,
+                            enabled = region != null && region != AtsFrequencyRegion.Unsupported,
+                            onClick = { mode = candidate },
+                            modifier = Modifier.weight(1f),
+                            height = 44.dp,
+                            fontSize = 14.sp,
+                        )
+                    }
                 }
             }
 
@@ -1712,41 +1781,51 @@ private fun MemoryEditorDialog(
                 onValueChange = { notes = it },
             )
 
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                PuckButton(
-                    text = "FAV",
-                    selected = favorite,
-                    colors = colors,
-                    onClick = { favorite = !favorite },
-                    modifier = Modifier.weight(1f),
-                    height = 46.dp,
-                    fontSize = 13.sp,
+            if (temporarySource) {
+                Text(
+                    text = "SAVING CREATES A PERMANENT USER.json OVERRIDE. FAV AND SKIP CAN BE SET AFTER LOADING SRC.",
+                    color = colors.muted,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
                 )
-                PuckButton(
-                    text = "SKIP",
-                    selected = skip,
-                    colors = colors,
-                    onClick = { skip = !skip },
-                    modifier = Modifier.weight(1f),
-                    height = 46.dp,
-                    fontSize = 13.sp,
+            } else {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    PuckButton(
+                        text = "FAV",
+                        selected = favorite,
+                        colors = colors,
+                        onClick = { favorite = !favorite },
+                        modifier = Modifier.weight(1f),
+                        height = 46.dp,
+                        fontSize = 13.sp,
+                    )
+                    PuckButton(
+                        text = "SKIP",
+                        selected = skip,
+                        colors = colors,
+                        onClick = { skip = !skip },
+                        modifier = Modifier.weight(1f),
+                        height = 46.dp,
+                        fontSize = 13.sp,
+                    )
+                }
+                Text(
+                    text = "SKIP KEEPS THE MEMORY AVAILABLE BUT EXCLUDES IT FROM SCANNING.",
+                    color = colors.muted,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
                 )
             }
-            Text(
-                text = "SKIP KEEPS THE MEMORY AVAILABLE BUT EXCLUDES IT FROM SCANNING.",
-                color = colors.muted,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-            )
 
             val validationText = when {
                 parsedFrequency == null -> "ENTER A FREQUENCY"
                 region == AtsFrequencyRegion.Unsupported -> AtsFrequencyPlan.validationMessage(parsedFrequency)
                 duplicateFrequency -> "A MEMORY ALREADY EXISTS AT THIS FREQUENCY"
                 name.isBlank() -> "NAME IS REQUIRED"
+                temporarySource && !temporarySaveAvailable -> "SELECT A FREQUENCY DIRECTORY ON SRC TO SAVE"
                 else -> null
             }
             if (validationText != null) {
@@ -1762,7 +1841,7 @@ private fun MemoryEditorDialog(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
             ) {
-                if (existing != null) {
+                if (existing != null && !temporarySource) {
                     PuckButton(
                         text = "DELETE",
                         colors = colors,
@@ -1781,7 +1860,11 @@ private fun MemoryEditorDialog(
                     fontSize = 14.sp,
                 )
                 PuckButton(
-                    text = if (existing == null) "CREATE" else "UPDATE",
+                    text = when {
+                        temporarySource -> "SAVE"
+                        existing == null -> "CREATE"
+                        else -> "UPDATE"
+                    },
                     selected = canSave,
                     colors = colors,
                     enabled = canSave,
@@ -1794,7 +1877,7 @@ private fun MemoryEditorDialog(
         }
     }
 
-    if (deleteConfirmationVisible && existing != null) {
+    if (deleteConfirmationVisible && existing != null && !temporarySource) {
         Dialog(onDismissRequest = { deleteConfirmationVisible = false }) {
             Surface(
                 color = colors.background,
@@ -1891,10 +1974,138 @@ private fun MemoryEditorField(
     }
 }
 
+private val NowTimestampFormatter: DateTimeFormatter = DateTimeFormatter
+    .ofPattern("yyyy-MM-dd HH:mm 'UTC'")
+    .withZone(ZoneOffset.UTC)
+
+@Composable
+private fun NowScreen(
+    state: NowSourceState,
+    activeSource: ActiveMemorySource,
+    colors: PuckColors,
+    refresh: () -> Unit,
+    loadNow: () -> Unit,
+) {
+    val nowLoaded = activeSource == ActiveMemorySource.NOW
+
+    PuckPanel(colors = colors) {
+        SectionTitle("EIBI ACTIVE FREQUENCIES")
+        Spacer(Modifier.height(8.dp))
+        Text(
+            text = "LOAD REPLACES LIST WITH MEMORIES ACTIVE AT THE CURRENT UTC TIME.",
+            color = colors.muted,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            PuckButton(
+                text = if (state.cacheAvailable) "REFRESH" else "DOWNLOAD",
+                colors = colors,
+                enabled = !state.busy,
+                onClick = refresh,
+                modifier = Modifier.weight(1f),
+                height = 46.dp,
+                fontSize = 14.sp,
+            )
+            PuckButton(
+                text = if (nowLoaded) "LIST LOADED" else "LOAD LIST",
+                selected = nowLoaded,
+                colors = colors,
+                enabled = state.cacheAvailable && !state.busy && !nowLoaded,
+                onClick = loadNow,
+                modifier = Modifier.weight(1f),
+                height = 46.dp,
+                fontSize = 14.sp,
+            )
+        }
+        Spacer(Modifier.height(10.dp))
+        NowSourceDetail(
+            label = "CACHE",
+            value = if (state.cacheAvailable) "READY" else "NOT DOWNLOADED",
+            colors = colors,
+        )
+        state.lastDownloadedEpochMillis?.let { epochMillis ->
+            NowSourceDetail(
+                label = "REFRESHED",
+                value = NowTimestampFormatter.format(Instant.ofEpochMilli(epochMillis)),
+                colors = colors,
+            )
+        }
+        state.sourceLastUpdate?.let { sourceUpdate ->
+            NowSourceDetail(
+                label = "EIBI UPDATE",
+                value = sourceUpdate.uppercase(),
+                colors = colors,
+            )
+        }
+        if (state.sourceRecordCount > 0) {
+            NowSourceDetail(
+                label = "RECORDS",
+                value = state.sourceRecordCount.toString(),
+                colors = colors,
+            )
+        }
+        if (nowLoaded || state.activeMemoryCount > 0) {
+            NowSourceDetail(
+                label = if (nowLoaded) "ACTIVE" else "LAST ACTIVE",
+                value = state.activeMemoryCount.toString(),
+                colors = colors,
+            )
+        }
+        state.message?.takeIf(String::isNotBlank)?.let { message ->
+            Spacer(Modifier.height(8.dp))
+            Text(
+                text = if (state.busy) "..." else message.uppercase(),
+                color = colors.muted,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+    }
+
+}
+
+@Composable
+private fun NowSourceDetail(
+    label: String,
+    value: String,
+    colors: PuckColors,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(vertical = 3.dp),
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+        verticalAlignment = Alignment.Top,
+    ) {
+        Text(
+            text = label,
+            modifier = Modifier.width(88.dp),
+            color = colors.muted,
+            fontSize = 12.sp,
+            fontWeight = FontWeight.Black,
+        )
+        Text(
+            text = value,
+            modifier = Modifier.weight(1f),
+            fontFamily = FontFamily.Monospace,
+            fontSize = 13.sp,
+            fontWeight = FontWeight.Bold,
+        )
+    }
+}
+
 @Composable
 private fun SourceScreen(
     state: FrequencySourceState,
+    activeSource: ActiveMemorySource,
     colors: PuckColors,
+    loadCurated: () -> Unit,
     selectDirectory: (Uri) -> Unit,
     refresh: () -> Unit,
     downloadTemplate: () -> Unit,
@@ -1925,18 +2136,25 @@ private fun SourceScreen(
     PuckPanel(colors = colors) {
         SectionTitle("FREQUENCY SOURCES")
         Spacer(Modifier.height(8.dp))
-        Text(
-            text = "USER.json LOADS FIRST. PACK FILES REMAIN PRISTINE.",
-            color = colors.muted,
+        val curatedLoaded = activeSource == ActiveMemorySource.CURATED
+        PuckButton(
+            text = if (curatedLoaded) "SRC LOADED" else "LOAD SRC",
+            selected = curatedLoaded,
+            colors = colors,
+            enabled = !curatedLoaded && !state.busy,
+            onClick = loadCurated,
+            modifier = Modifier.fillMaxWidth(),
+            height = 46.dp,
             fontSize = 14.sp,
-            fontWeight = FontWeight.Bold,
         )
         Spacer(Modifier.height(10.dp))
         Text(
-            text = state.directoryName?.uppercase() ?: "NO FREQUENCY DIRECTORY SELECTED",
+            text = sourceDirectoryPath(state.directoryName),
             fontFamily = FontFamily.Monospace,
             fontSize = 16.sp,
             fontWeight = FontWeight.Black,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
         )
         Spacer(Modifier.height(8.dp))
         Row(
@@ -2316,8 +2534,8 @@ private fun ConfigScreen(
     ) {
         Text("Receiver: Settings → Bluetooth → Ad hoc")
         Spacer(Modifier.height(7.dp))
-        Text("LINK: ${headerLinkText(state)}", fontWeight = FontWeight.Bold)
-        Text("Z: ${capabilityText(state.capability)}")
+        Text("LINK: ${headerConnectionText(state)}", fontWeight = FontWeight.Bold)
+        Text("TUNE: ${capabilityText(state.capability)}")
         Text("STATUS: ${state.statusStream.name.uppercase()}")
 
         Spacer(Modifier.height(10.dp))
@@ -2360,7 +2578,7 @@ private fun ConfigScreen(
         if (state.link is LinkState.Ready) {
             Spacer(Modifier.height(7.dp))
             PuckButton(
-                text = "PROBE Z?",
+                text = "RECHECK TUNE",
                 colors = colors,
                 onClick = probeCapability,
                 modifier = Modifier.fillMaxWidth(),
@@ -2728,6 +2946,33 @@ private fun PlaceholderScreen(title: String, message: String, colors: PuckColors
 }
 
 @Composable
+private fun FrequencyTitle(colors: PuckColors) {
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(2.dp)
+                .background(colors.foreground),
+        )
+        Text(
+            text = "FREQUENCY",
+            fontSize = 21.sp,
+            fontWeight = FontWeight.Black,
+        )
+        Box(
+            modifier = Modifier
+                .weight(1f)
+                .height(2.dp)
+                .background(colors.foreground),
+        )
+    }
+}
+
+@Composable
 private fun SectionTitle(text: String) {
     Text(
         text = text,
@@ -2784,22 +3029,32 @@ private fun PuckButton(
     }
 }
 
-private fun headerLinkText(state: RadioSnapshot): String = when (val link = state.link) {
-    LinkState.Disconnected -> "DISCONNECTED"
-    LinkState.Connecting -> "CONNECTING"
-    is LinkState.Ready -> when (val capability = state.capability) {
-        is CapabilityState.Supported -> "READY • Z${capability.version}"
-        CapabilityState.Checking -> "READY • CHECKING"
-        else -> "READY"
+private fun headerConnectionText(state: RadioSnapshot): String =
+    if (state.link is LinkState.Ready) "ONLINE" else "OFFLINE"
+
+private fun headerReceiverStateText(state: RadioSnapshot): String {
+    val connection = headerConnectionText(state)
+    val firmware = when ((state.capability as? CapabilityState.Supported)?.protocol) {
+        TuningProtocol.AbsoluteZ -> "FAST"
+        TuningProtocol.LegacyAdHoc, null -> "STOCK"
     }
-    is LinkState.Failed -> "ERROR"
+    return "$connection:$firmware"
+}
+
+private fun sourceDirectoryPath(directoryName: String?): String {
+    val name = directoryName?.trim().orEmpty()
+    if (name.isEmpty()) return "NO PATH SELECTED"
+    return if (name.startsWith('/')) name else "/$name"
 }
 
 private fun capabilityText(capability: CapabilityState): String = when (capability) {
     CapabilityState.NotChecked -> "NOT CHECKED"
-    CapabilityState.Checking -> "CHECKING"
-    is CapabilityState.Supported -> "SUPPORTED V${capability.version}"
-    is CapabilityState.Unsupported -> "NOT DETECTED"
+    CapabilityState.Checking -> "CHECKING Z / STOCK"
+    is CapabilityState.Supported -> when (capability.protocol) {
+        TuningProtocol.AbsoluteZ -> "Z PROTOCOL V${capability.version}"
+        TuningProtocol.LegacyAdHoc -> "STOCK B/M/F • FW ${atsFirmwareVersion(capability.version)}"
+    }
+    is CapabilityState.Unsupported -> "UNSUPPORTED"
 }
 
 private fun primaryStatusLine(state: RadioSnapshot): String {
@@ -2811,7 +3066,7 @@ private fun primaryStatusLine(state: RadioSnapshot): String {
     }
 
     return when (state.link) {
-        LinkState.Disconnected -> "YOU'RE DISCONNECTED. TAP HERE TO CONNECT."
+        LinkState.Disconnected -> "YOU'RE OFFLINE. TAP HERE TO CONNECT."
         LinkState.Connecting -> "CONNECTING TO ATS MINI"
         is LinkState.Ready -> "ATS MINI READY • S -- / N --"
         is LinkState.Failed -> "CONNECTION ERROR"
@@ -2824,9 +3079,13 @@ private fun secondaryStatusLine(state: RadioSnapshot): String {
         return "${status.bandwidth} • STEP ${status.step} • VOL ${status.volume} • ${"%.2f".format(status.voltage)} V • FW ${status.firmwareVersion}"
     }
     return when (val capability = state.capability) {
-        is CapabilityState.Supported -> "Absolute tuning supported • Z protocol v${capability.version}"
+        is CapabilityState.Supported -> when (capability.protocol) {
+            TuningProtocol.AbsoluteZ -> "Absolute tuning • Z protocol v${capability.version}"
+            TuningProtocol.LegacyAdHoc ->
+                "Compatible stock firmware • verified B/M/F tuning"
+        }
         is CapabilityState.Unsupported -> capability.detail
-        CapabilityState.Checking -> "Checking patched-firmware capability"
+        CapabilityState.Checking -> "Checking Z and stock-firmware compatibility"
         CapabilityState.NotChecked -> if (state.link is LinkState.Disconnected) {
             "OPENS CONFIG AND STARTS THE ATS MINI SCAN"
         } else {
@@ -2834,6 +3093,10 @@ private fun secondaryStatusLine(state: RadioSnapshot): String {
         }
     }
 }
+
+
+private fun atsFirmwareVersion(version: Int): String =
+    "${version / 100}.${(version % 100).toString().padStart(2, '0')}"
 
 private fun canTune(state: RadioSnapshot): Boolean =
     state.link is LinkState.Ready && state.capability is CapabilityState.Supported
