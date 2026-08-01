@@ -1,4 +1,53 @@
+## 0.36.0-dev.23 — confidence-gated dropout concealment (2026-08-01)
+
+- Leave every Robot 36 line scoring 95 or higher completely untouched.
+- Attempt isolated dropout repair only when one suspect line scores below 95 and both adjacent lines score at least 95.
+- Preserve the existing conservative 3–80 pixel run limits and neighbor interpolation.
+- Keep all AUTO acquisition, completion, replay-buffer, SAVE, SHARE, and IMG page behavior unchanged.
+- Updated About/build metadata to `0.36.0-dev.23`, version code 54.
+
+## 0.36.0-dev.08 — Robot 36 clean luminance demodulation (2026-08-01)
+
+- Restrict filtering to the Robot 36 luminance window so separator/chroma cannot contaminate Y.
+- Reject FM discriminator phase-wrap spikes with a trimmed per-pixel mean and clamp mapped luminance to 0..1.
+- Preserve linear grayscale internally instead of applying premature square-root compression.
+- Replace fixed Bayer ordered dithering with serpentine Floyd-Steinberg error diffusion for cleaner theme-aware monochrome photographs.
+- Extend line probes to report post-demodulation mapped luminance values.
+- Updated About/build metadata to `0.36.0-dev.08` and IMG diagnostics to slice 07.
+
+## 0.36.0-dev.07 — Robot 36 line sampling probe (2026-08-01)
+
+- Changed luminance reconstruction from one demodulated point per pixel to an average across each pixel's complete sample span.
+- Added deterministic Robot 36 line probes at lines 1, 2, 60, 120, 180, and 240, including luminance range and sixteen horizontal buckets.
+- Clarified diagnostics that the three-millisecond first-pixel offset is measured after the detected end of the nine-millisecond sync pulse.
+- Updated IMG diagnostics to slice 06 and application metadata to `0.36.0-dev.07`.
+
+## 0.36.0-dev.06
+
+- Fix Robot 36 luminance-first decoding crash caused by writing a second chroma-paired row into a one-row live pixel buffer.
+- Keep live reconstruction strictly luminance-only while preserving progressive output.
+- Remove the Kotlin 2.5 expression-body return warning from IMG diagnostic audio logging.
+
 # Changelog
+
+## 0.36.0-dev.05 — Robot 36 luminance-first reconstruction (2026-08-01)
+
+- Changed live Robot 36 reconstruction to emit one complete luminance row for every received scan line.
+- Removed chroma-pair dependence from the first-pass display so separator mistakes cannot collapse the frame into vertical texture.
+- Preserved adaptive acquisition, VIS confirmation, frequency correction, progressive rendering, and the local PCM recovery buffer.
+- Added Robot 36 geometry diagnostics after VIS lock.
+- Cleaned the Kotlin expression-body warning in `ImageDiagnosticLogger.begin`.
+- Updated application metadata to version `0.36.0-dev.05`; retained development version code `36`.
+
+## 0.36.0-dev.04 — adaptive progressive Robot 36 decode (2026-08-01)
+
+- Begin a provisional Robot 36 raw decode after two plausible line-sync pulses instead of requiring a valid VIS header before showing pixels.
+- Broaden initial sync acquisition so translated SSTV audio can lock several hundred hertz away from nominal.
+- Estimate and smooth a global tone-frequency correction from repeated sync pulses, and apply it to subsequent pixel decoding.
+- Keep VIS detection active so a valid Robot 36 header can promote the provisional decode to a confirmed mode.
+- Show the live correction and confidence on the IMG status line and add adaptive-lock details to the diagnostic log.
+- Preserve the existing 60-second local PCM capture for later replay and early-line recovery.
+- Updated application metadata to version `0.36.0-dev.04`, version code `36`.
 
 ## 0.35.0 — final pre-1.0 field-test release (2026-08-01)
 

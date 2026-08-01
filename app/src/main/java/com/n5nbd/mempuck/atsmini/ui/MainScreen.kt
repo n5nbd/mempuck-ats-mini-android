@@ -81,6 +81,11 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.n5nbd.mempuck.atsmini.BuildConfig
+import com.n5nbd.mempuck.atsmini.img.model.ImageAudioInput
+import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderSelection
+import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderState
+import com.n5nbd.mempuck.atsmini.img.ui.ImageDecoderPalette
+import com.n5nbd.mempuck.atsmini.img.ui.ImageDecoderScreen
 import com.n5nbd.mempuck.atsmini.model.ActiveMemorySource
 import com.n5nbd.mempuck.atsmini.model.AtsFrequencyPlan
 import com.n5nbd.mempuck.atsmini.model.AtsFrequencyRegion
@@ -164,6 +169,7 @@ private enum class AppTab(val label: String) {
     List("LST"),
     Source("SRC"),
     Now("NOW"),
+    Image("IMG"),
     Config("CFG"),
 }
 
@@ -225,6 +231,13 @@ fun MainScreen(
     onHfVfoLargeStep: (HfVfoLargeStep) -> Unit,
     scanDwell: ScanDwell,
     onScanDwell: (ScanDwell) -> Unit,
+    imageState: ImageDecoderState,
+    imageAudioPermissionGranted: Boolean,
+    onImageSelectDecoder: (ImageDecoderSelection) -> Unit,
+    onImageSelectInput: (ImageAudioInput) -> Unit,
+    onImageListen: () -> Unit,
+    onImageStop: () -> Unit,
+    onImageClear: () -> Unit,
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val memories by viewModel.memories.collectAsStateWithLifecycle()
@@ -423,6 +436,22 @@ fun MainScreen(
                                     importPack = viewModel::importFrequencyPack,
                                     exportFile = viewModel::exportFrequencyFile,
                                     deleteFile = viewModel::deleteFrequencyFile,
+                                )
+                                AppTab.Image -> ImageDecoderScreen(
+                                    state = imageState,
+                                    microphonePermissionGranted = imageAudioPermissionGranted,
+                                    palette = ImageDecoderPalette(
+                                        background = colors.background,
+                                        foreground = colors.foreground,
+                                        selectedBackground = colors.selectedBackground,
+                                        selectedForeground = colors.selectedForeground,
+                                        muted = colors.muted,
+                                    ),
+                                    onSelectDecoder = onImageSelectDecoder,
+                                    onSelectInput = onImageSelectInput,
+                                    onListen = onImageListen,
+                                    onStop = onImageStop,
+                                    onClear = onImageClear,
                                 )
                                 AppTab.Config -> ConfigScreen(
                                     state = state,

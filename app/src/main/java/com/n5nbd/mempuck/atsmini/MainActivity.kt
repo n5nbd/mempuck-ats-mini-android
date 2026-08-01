@@ -1,5 +1,8 @@
 package com.n5nbd.mempuck.atsmini
 
+import android.Manifest
+import android.content.Context
+import android.content.pm.PackageManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -14,11 +17,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.n5nbd.mempuck.atsmini.ble.hasBluetoothPermissions
 import com.n5nbd.mempuck.atsmini.ble.requiredBluetoothPermissions
+import com.n5nbd.mempuck.atsmini.img.repository.ImageDecoderViewModel
 import com.n5nbd.mempuck.atsmini.ui.HfVfoLargeStep
 import com.n5nbd.mempuck.atsmini.ui.HfVfoSmallStep
 import com.n5nbd.mempuck.atsmini.ui.MainScreen
@@ -121,6 +127,27 @@ class MainActivity : ComponentActivity() {
                     app.nowRepository,
                 ),
             )
+            val imageModel: ImageDecoderViewModel = viewModel(
+                factory = ImageDecoderViewModel.factory(app.imageDecoderRepository),
+            )
+            val imageState by imageModel.state.collectAsStateWithLifecycle()
+            var imageAudioPermissionGranted by remember {
+                mutableStateOf(hasImageAudioPermission(context))
+            }
+            var startImageAfterPermission by remember { mutableStateOf(false) }
+            val imagePermissionLauncher = rememberLauncherForActivityResult(
+                ActivityResultContracts.RequestPermission(),
+            ) { granted ->
+                imageAudioPermissionGranted = granted && hasImageAudioPermission(context)
+                if (startImageAfterPermission) {
+                    startImageAfterPermission = false
+                    if (imageAudioPermissionGranted) {
+                        imageModel.startListening()
+                    } else {
+                        imageModel.microphonePermissionDenied()
+                    }
+                }
+            }
 
             MainScreen(
                 viewModel = model,
@@ -158,7 +185,33 @@ class MainActivity : ComponentActivity() {
                     scanDwell = selected
                     preferences.edit().putString("scanDwell", selected.name).apply()
                 },
+                imageState = imageState,
+                imageAudioPermissionGranted = imageAudioPermissionGranted,
+                onImageSelectDecoder = imageModel::selectDecoder,
+                onImageSelectInput = imageModel::selectInput,
+                onImageListen = {
+                    imageAudioPermissionGranted = hasImageAudioPermission(context)
+                    if (imageAudioPermissionGranted) {
+                        imageModel.startListening()
+                    } else {
+                        startImageAfterPermission = true
+                        imagePermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
+                    }
+                },
+                onImageStop = imageModel::stopListening,
+                onImageClear = imageModel::clearImage,
             )
         }
     }
+
+    override fun onStop() {
+        (application as? MemPuckApplication)?.imageDecoderRepository?.stopListening()
+        super.onStop()
+    }
 }
+
+private fun hasImageAudioPermission(context: Context): Boolean =
+    ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.RECORD_AUDIO,
+    ) == PackageManager.PERMISSION_GRANTED
