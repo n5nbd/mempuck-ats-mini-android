@@ -517,13 +517,15 @@ private fun statusDetail(
             "${state.detectedMode ?: "SSTV"} • ${frame.completedLines}/${frame.height} LINES$adaptive"
 
         state.listening && state.decoder == ImageDecoderSelection.SSTV ->
-            "R36 LIVE MANUAL SYNC; TAP AUTO OR M1 TO SWITCH"
+            "R36 LIVE MANUAL SYNC; TAP AUTO, M1, OR M2 TO SWITCH"
         state.listening && state.decoder == ImageDecoderSelection.MARTIN_M1 ->
-            "M1 LIVE MANUAL SYNC; TAP AUTO OR R36 TO SWITCH"
-        state.listening -> "LISTENING FOR R36 OR M1 VIS; MANUAL SWITCH AVAILABLE"
+            "M1 LIVE MANUAL SYNC; TAP AUTO, R36, OR M2 TO SWITCH"
+        state.listening && state.decoder == ImageDecoderSelection.MARTIN_M2 ->
+            "M2 LIVE MANUAL SYNC; TAP AUTO, R36, OR M1 TO SWITCH"
+        state.listening -> "LISTENING FOR R36, M1, OR M2 VIS; MANUAL SWITCH AVAILABLE"
         !microphonePermissionGranted -> "MIC PERMISSION REQUESTS ONLY AFTER LISTEN"
         state.decoder == ImageDecoderSelection.WEFAX -> "WEFAX ENGINE FOLLOWS SSTV HARDWARE TEST"
-        else -> "R36 + M1 AUTO/LIVE MANUAL READY"
+        else -> "R36 + M1 + M2 AUTO/LIVE MANUAL READY"
     }
 }
 

@@ -8,6 +8,7 @@ import com.n5nbd.mempuck.atsmini.img.audio.ImageAudioSource
 import com.n5nbd.mempuck.atsmini.img.audio.MicrophoneImageAudioSource
 import com.n5nbd.mempuck.atsmini.img.audio.PcmRingBuffer
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.MartinM1Decoder
+import com.n5nbd.mempuck.atsmini.img.decoder.robot36.MartinM2Decoder
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.Robot36Decoder
 import com.n5nbd.mempuck.atsmini.img.diagnostics.ImageDiagnosticLogger
 import com.n5nbd.mempuck.atsmini.img.model.DecodedImageFrame
@@ -29,6 +30,7 @@ class ImageDecoderRepository(
     private enum class ActiveSstvDecoder {
         ROBOT_36,
         MARTIN_M1,
+        MARTIN_M2,
     }
 
     private val applicationContext = context.applicationContext
@@ -38,6 +40,7 @@ class ImageDecoderRepository(
 
     private var robot36Decoder: Robot36Decoder? = null
     private var martinM1Decoder: MartinM1Decoder? = null
+    private var martinM2Decoder: MartinM2Decoder? = null
     private var activeDecoder: ActiveSstvDecoder? = null
     private var autoRearmPending = false
     private var captureBuffer: PcmRingBuffer? = null
@@ -51,13 +54,14 @@ class ImageDecoderRepository(
         synchronized(sessionLock) {
             val current = state.value
             if (current.listening) {
-                // WEFAX is not a live decoder in this slice. AUTO, R36, and M1
+                // WEFAX is not a live decoder in this slice. AUTO, R36, M1, and M2
                 // can be hot-switched without interrupting AudioRecord.
                 if (decoder == ImageDecoderSelection.WEFAX || decoder == current.decoder) return
 
                 val sampleRateHz = activeSampleRateHz ?: current.sampleRateHz
                 robot36Decoder = null
                 martinM1Decoder = null
+                martinM2Decoder = null
                 activeDecoder = null
                 autoRearmPending = false
                 frameRevision += 1
@@ -86,6 +90,7 @@ class ImageDecoderRepository(
 
             robot36Decoder = null
             martinM1Decoder = null
+            martinM2Decoder = null
             activeDecoder = null
             autoRearmPending = false
             activeSampleRateHz = null
@@ -134,6 +139,7 @@ class ImageDecoderRepository(
         synchronized(sessionLock) {
             robot36Decoder = null
             martinM1Decoder = null
+            martinM2Decoder = null
             activeDecoder = null
             autoRearmPending = false
             captureBuffer = null
@@ -209,6 +215,7 @@ class ImageDecoderRepository(
         synchronized(sessionLock) {
             robot36Decoder = null
             martinM1Decoder = null
+            martinM2Decoder = null
             activeDecoder = null
             autoRearmPending = false
             captureBuffer?.clear()
@@ -284,21 +291,26 @@ class ImageDecoderRepository(
             ImageDecoderSelection.AUTO -> when (activeDecoder) {
                 ActiveSstvDecoder.ROBOT_36 -> robot36Decoder?.process(samples, count)
                 ActiveSstvDecoder.MARTIN_M1 -> martinM1Decoder?.process(samples, count)
+                ActiveSstvDecoder.MARTIN_M2 -> martinM2Decoder?.process(samples, count)
                 null -> {
                     robot36Decoder?.process(samples, count)
                     if (activeDecoder == null) {
                         martinM1Decoder?.process(samples, count)
+                    }
+                    if (activeDecoder == null) {
+                        martinM2Decoder?.process(samples, count)
                     }
                 }
             }
 
             ImageDecoderSelection.SSTV -> robot36Decoder?.process(samples, count)
             ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder?.process(samples, count)
+            ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder?.process(samples, count)
             ImageDecoderSelection.WEFAX -> Unit
         }
 
         // A completed AUTO frame must remain visible and savable, but the decoder
-        // claim must not remain latched. Recreate both acquisition candidates only
+        // claim must not remain latched. Recreate all acquisition candidates only
         // after the callback stack returns so the next transmission can choose a
         // different VIS mode without CLEAR or leaving the IMG page.
         if (autoRearmPending) {
@@ -311,14 +323,17 @@ class ImageDecoderRepository(
             ImageDecoderSelection.AUTO -> when (activeDecoder) {
                 ActiveSstvDecoder.ROBOT_36 -> robot36Decoder?.finishCapture(reason)
                 ActiveSstvDecoder.MARTIN_M1 -> martinM1Decoder?.finishCapture(reason)
+                ActiveSstvDecoder.MARTIN_M2 -> martinM2Decoder?.finishCapture(reason)
                 null -> {
                     robot36Decoder?.finishCapture(reason)
                     martinM1Decoder?.finishCapture(reason)
+                    martinM2Decoder?.finishCapture(reason)
                 }
             }
 
             ImageDecoderSelection.SSTV -> robot36Decoder?.finishCapture(reason)
             ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder?.finishCapture(reason)
+            ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder?.finishCapture(reason)
             ImageDecoderSelection.WEFAX -> Unit
         }
     }
@@ -355,6 +370,7 @@ class ImageDecoderRepository(
         activeDecoder = when (selection) {
             ImageDecoderSelection.SSTV -> ActiveSstvDecoder.ROBOT_36
             ImageDecoderSelection.MARTIN_M1 -> ActiveSstvDecoder.MARTIN_M1
+            ImageDecoderSelection.MARTIN_M2 -> ActiveSstvDecoder.MARTIN_M2
             else -> null
         }
         robot36Decoder = when (selection) {
@@ -379,12 +395,25 @@ class ImageDecoderRepository(
 
             else -> null
         }
+        martinM2Decoder = when (selection) {
+            ImageDecoderSelection.AUTO,
+            ImageDecoderSelection.MARTIN_M2,
+            -> MartinM2Decoder(
+                sampleRateHz,
+                martinM2Listener(),
+                selection == ImageDecoderSelection.MARTIN_M2,
+            )
+
+            else -> null
+        }
     }
 
     private fun decoderPipelineReady(): Boolean = when (state.value.decoder) {
-        ImageDecoderSelection.AUTO -> robot36Decoder != null && martinM1Decoder != null
+        ImageDecoderSelection.AUTO ->
+            robot36Decoder != null && martinM1Decoder != null && martinM2Decoder != null
         ImageDecoderSelection.SSTV -> robot36Decoder != null
         ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder != null
+        ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder != null
         ImageDecoderSelection.WEFAX -> true
     }
 
@@ -410,6 +439,11 @@ class ImageDecoderRepository(
             martinM1Listener(),
             false,
         )
+        martinM2Decoder = MartinM2Decoder(
+            sampleRateHz,
+            martinM2Listener(),
+            false,
+        )
         diagnosticLogger.decoder(
             "AUTO rearmed after complete frame; retained displayed image and PCM buffer",
         )
@@ -423,6 +457,7 @@ class ImageDecoderRepository(
 
         ImageDecoderSelection.SSTV -> candidate == ActiveSstvDecoder.ROBOT_36
         ImageDecoderSelection.MARTIN_M1 -> candidate == ActiveSstvDecoder.MARTIN_M1
+        ImageDecoderSelection.MARTIN_M2 -> candidate == ActiveSstvDecoder.MARTIN_M2
         ImageDecoderSelection.WEFAX -> false
     }
 
@@ -530,6 +565,51 @@ class ImageDecoderRepository(
             complete: Boolean,
         ) {
             writeRawFrame("MARTIN1", width, height, grayPixels, complete)
+        }
+    }
+
+    private fun martinM2Listener(): MartinM2Decoder.Listener = object : MartinM2Decoder.Listener {
+        override fun onModeDetected(modeName: String) {
+            modeDetected(ActiveSstvDecoder.MARTIN_M2, modeName)
+        }
+
+        override fun onAdaptiveStatus(modeName: String, correctionHz: Int, confidence: Int) {
+            adaptiveStatus(ActiveSstvDecoder.MARTIN_M2, modeName, correctionHz, confidence)
+        }
+
+        override fun onFrame(
+            width: Int,
+            height: Int,
+            argbPixels: IntArray,
+            completedLines: Int,
+            complete: Boolean,
+        ) {
+            decodedFrame(
+                ActiveSstvDecoder.MARTIN_M2,
+                "MARTIN M2",
+                width,
+                height,
+                argbPixels,
+                completedLines,
+                complete,
+            )
+        }
+
+        override fun onDiagnostic(message: String) {
+            diagnosticLogger.decoder(message)
+        }
+
+        override fun onTimeline(text: String) {
+            writeTimeline("MARTIN2", text)
+        }
+
+        override fun onRawGrayscaleFrame(
+            width: Int,
+            height: Int,
+            grayPixels: ByteArray,
+            complete: Boolean,
+        ) {
+            writeRawFrame("MARTIN2", width, height, grayPixels, complete)
         }
     }
 

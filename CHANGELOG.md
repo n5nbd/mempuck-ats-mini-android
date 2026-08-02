@@ -1,3 +1,13 @@
+## 0.36.0-dev.28 — Martin M2 live decoder (2026-08-02)
+
+- Add Martin M2 SSTV decoding at 320 × 256 with VIS code 40 and the standard 73.216 ms G/B/R channel timing.
+- Add compact `M2` manual selection beside `AUTO`, `R36`, and `M1`.
+- Include Martin M2 as a third AUTO acquisition candidate while preserving the proven Robot 36 and Martin M1 decoder files byte-for-byte.
+- Support live hot-switching to and from M2 without restarting the microphone; partial M2 images use the existing color SAVE path.
+- Rearm AUTO with R36, M1, and M2 candidates after a completed image so consecutive transmissions can change mode without CLEAR.
+- Add Martin M2 VIS, callback-boundary, progressive color, full-frame completion, manual mid-stream, and wrong-VIS rejection regression coverage.
+- Updated About/build metadata to `0.36.0-dev.28`, version code 67.
+
 ## 0.36.0-dev.27 — Live manual SSTV mode switching (2026-08-02)
 
 - Rename the manual Robot 36 control from `SSTV` to the compact `R36` label.

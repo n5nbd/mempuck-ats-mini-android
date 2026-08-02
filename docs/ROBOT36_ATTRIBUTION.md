@@ -33,3 +33,12 @@ This hardware-test slice imports or adapts only the minimum DSP and decoder piec
 The Java package was renamed for MemPuck. The broad Robot36 decoder was deliberately reduced to Robot 36 for the first hardware slice, and callbacks were added for a Compose-native repository/state layer. The original Robot36 `Activity`, Android `View`, rendering UI, preferences, and application structure were not copied.
 
 Later SSTV modes and HF Fax/WEFAX work must retain this notice and document any additional imported source files.
+
+## Martin mode additions
+
+Later IMG decoder slices also adapt the upstream Martin RGB timing and channel-order model while retaining the same 0BSD notice:
+
+- Martin M1: 320 × 256, VIS 44.
+- Martin M2: 320 × 256, VIS 40.
+
+MemPuck keeps separate live decoder classes for the hardware-test slices so the proven Robot 36 and Martin M1 implementations remain unchanged while each additional mode is validated independently.
