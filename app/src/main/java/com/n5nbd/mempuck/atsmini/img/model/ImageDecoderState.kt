@@ -1,13 +1,13 @@
 package com.n5nbd.mempuck.atsmini.img.model
 
 enum class ImageDecoderSelection(val label: String) {
-    AUTO("AUTO"),
+    AUTO("??"),
     SSTV("R36"),
     MARTIN_M1("M1"),
     MARTIN_M2("M2"),
     SCOTTIE_S1("S1"),
     SCOTTIE_S2("S2"),
-    WEFAX("WEFAX"),
+    WEFAX("WX"),
 }
 
 enum class ImageAudioInput(
@@ -37,6 +37,7 @@ data class DecodedImageFrame(
     val argbPixels: IntArray,
     val completedLines: Int,
     val revision: Long,
+    val continuous: Boolean = false,
 )
 
 data class ImageDecoderState(

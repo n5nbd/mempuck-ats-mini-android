@@ -1,3 +1,36 @@
+## 0.36.0-dev.33r2 — WEFAX robust clock correction (2026-08-02)
+
+- Replace first/last phasing-span averaging with a robust fit across every accepted phasing edge, reducing sensitivity to noisy endpoint edges and preserving the leading-white line origin.
+- Preserve the accepted phasing sequence through calibration completion and report fit residuals, final interval count, selected samples per line, and clock error in ppm.
+- Add conservative late-entry clock recovery for WEFAX captures that begin after phasing: compare repeated vertical-edge structure across separated line windows and require three agreeing, high-confidence estimates before changing timing.
+- When a late-entry correction is accepted, update the free-running samples-per-line value and non-destructively shear already received rows around the newest row so the completed image does not retain the earlier clock slant.
+- Reject correction on featureless images, weak/ambiguous correlation, disagreeing estimates, out-of-range clock error, or an isolated diagonal feature without multiple distinct vertical references.
+- Keep the development expiry at 2026-09-15 and identify the test build as `0.36.0-dev.33r2`; version code remains 72.
+- Preserve all IMG controls, WEFAX grayscale demodulation, progressive rendering, SAVE/SHARE behavior, and SSTV decoder paths unchanged.
+
+## 0.36.0-dev.33r1 — WEFAX phase and clock calibration (2026-08-02)
+
+- Keep WEFAX acquisition idle through silence, room noise, and the out-of-band IOC start signal; begin the late-entry timeout only after sustained fax-band audio is present.
+- Require five consecutive 120-LPM phasing intervals before accepting the leading white edge as the start of the WMO dead sector and therefore the horizontal line origin.
+- Measure the actual received samples per line from the phasing span and continue refining that estimate for the remainder of the phasing train, compensating for laptop/phone audio-clock mismatch that otherwise accumulates as diagonal skew.
+- Preserve nominal 120-LPM free-running decode as an active-audio late-entry fallback when a transmission is joined after phasing.
+- Add diagnostics for carrier acquisition, phase source, measured samples per line, clock error in ppm, refinement, and final calibrated clock.
+- Add deterministic regression coverage for silence-before-transmission, delayed manual fallback, measured phasing clock, stable line origin, and long-image skew.
+- Mark the test build as `0.36.0-dev.33r1`; version code remains 72.
+- Add the first pre-1.0 build expiry: the About panel shows `EXPIRES 2026-09-15`, and the expired build blocks operation with an install-newer-build message.
+
+## 0.36.0-dev.33 — Manual WEFAX IOC 576 / 120 LPM (2026-08-02)
+
+- Add a manual WEFAX decoder for IOC 576 at 120 lines per minute using the standard 1900 Hz center, 1500 Hz black, and 2300 Hz white tones.
+- Add a short phasing-acquisition window that aligns on repeated 120 LPM black-to-white phasing edges, then falls back to immediate manual line timing for late entry.
+- Render a grow-only progressive grayscale fax in the shared IMG surface, keep the newest received area visible, and crop unused backing-buffer rows from preview, SAVE, and SHARE output.
+- Treat STOP as completion for a manual WEFAX capture while preserving partial SAVE and completed-image replacement protection.
+- Allow live switching to and from WEFAX without restarting the microphone or replaying buffered PCM.
+- Change the decoder button labels from `AUTO` to `??` and from `WEFAX` to `WX`.
+- Preserve Robot 36, Martin M1, Martin M2, Scottie S1, Scottie S2, source-color SSTV SAVE, and theme-aware preview behavior.
+- Add deterministic WEFAX polarity, line-clock, manual-stop, and continuous-preview regression coverage.
+- Updated About/build metadata to `0.36.0-dev.33`, version code 72.
+
 ## 0.36.0-dev.32 — Scottie S2 live decoder (2026-08-02)
 
 - Add Scottie S2 SSTV decoding at 320 × 256 with VIS code 56, 88.064 ms RGB channels, and 277.692 ms line timing.

@@ -90,7 +90,7 @@ fun ImageDecoderScreen(
     }
     val completedFrame = state.image?.takeIf { frame ->
         state.signal == ImageSignalState.COMPLETE &&
-            frame.completedLines >= frame.height
+            (frame.continuous || frame.completedLines >= frame.height)
     }
 
     ImagePanel(palette = palette) {
@@ -152,12 +152,23 @@ fun ImageDecoderScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(2.dp),
-                    contentScale = ContentScale.Fit,
+                    contentScale = if (frame.continuous) {
+                        ContentScale.FillWidth
+                    } else {
+                        ContentScale.Fit
+                    },
+                    alignment = if (frame.continuous) {
+                        Alignment.BottomCenter
+                    } else {
+                        Alignment.Center
+                    },
                 )
             }
         }
 
-        state.image?.takeIf { state.signal == ImageSignalState.DECODING }?.let { frame ->
+        state.image?.takeIf {
+            state.signal == ImageSignalState.DECODING && !it.continuous
+        }?.let { frame ->
             val progress = (frame.completedLines.toFloat() / frame.height.toFloat())
                 .coerceIn(0f, 1f)
             Spacer(Modifier.height(4.dp))
@@ -187,7 +198,7 @@ fun ImageDecoderScreen(
                     text = decoder.label,
                     selected = state.decoder == decoder,
                     palette = palette,
-                    enabled = !state.listening || decoder != ImageDecoderSelection.WEFAX,
+                    enabled = true,
                     onClick = { onSelectDecoder(decoder) },
                     modifier = Modifier.weight(1f),
                 )
@@ -360,14 +371,15 @@ private fun monochromePreview(
     val lightTheme = argbLuma(panelBackground) > argbLuma(paletteForeground)
     val imageDark = semanticBlack
     val imageBright = if (lightTheme) semanticWhite else paletteForeground
-    val output = IntArray(frame.width * frame.height)
-    val completedLines = frame.completedLines.coerceIn(0, frame.height)
+    val renderedHeight = renderedImageHeight(frame)
+    val output = IntArray(frame.width * renderedHeight)
+    val completedLines = frame.completedLines.coerceIn(0, renderedHeight)
 
     // Preserve decoded luminance polarity in every theme: black signal content
     // remains black and white content remains bright. Light mode therefore uses
     // normal black-to-white grayscale instead of reversing the image. Dark mode
     // uses black-to-white, while hue mode uses black-to-selected-hue.
-    for (y in 0 until frame.height) {
+    for (y in 0 until renderedHeight) {
         val row = y * frame.width
         if (y >= completedLines) {
             output.fill(panelBackground, row, row + frame.width)
@@ -383,7 +395,7 @@ private fun monochromePreview(
     return Bitmap.createBitmap(
         output,
         frame.width,
-        frame.height,
+        renderedHeight,
         Bitmap.Config.ARGB_8888,
     )
 }
@@ -396,7 +408,7 @@ private fun colorImage(
     return Bitmap.createBitmap(
         output,
         frame.width,
-        frame.height,
+        renderedImageHeight(frame),
         Bitmap.Config.ARGB_8888,
     )
 }
@@ -486,7 +498,7 @@ private fun shareCompletedImage(context: android.content.Context, bitmap: Bitmap
 private fun compactStatus(state: ImageDecoderState): String {
     val session = if (
         state.signal == ImageSignalState.COMPLETE &&
-        state.image?.let { it.completedLines >= it.height } == true
+        state.image?.let { it.continuous || it.completedLines >= it.height } == true
     ) {
         "COMPLETE"
     } else {
@@ -512,22 +524,30 @@ private fun statusDetail(
         " • CORR $sign${correction} Hz • ${state.decoderConfidence}%"
     }.orEmpty()
     return when {
+        state.signal == ImageSignalState.COMPLETE && frame?.continuous == true ->
+            "${state.detectedMode ?: "WEFAX"} COMPLETE • ${frame.completedLines} LINES"
+
+        state.signal == ImageSignalState.DECODING && frame?.continuous == true ->
+            "${state.detectedMode ?: "WEFAX"} • ${frame.completedLines} LINES • STOP TO FINISH"
+
         state.signal == ImageSignalState.COMPLETE && frame != null ->
             "${state.detectedMode ?: "SSTV"} COMPLETE • ${frame.completedLines}/${frame.height} LINES$adaptive"
 
         state.signal == ImageSignalState.DECODING && frame != null ->
             "${state.detectedMode ?: "SSTV"} • ${frame.completedLines}/${frame.height} LINES$adaptive"
 
+        state.listening && state.decoder == ImageDecoderSelection.WEFAX ->
+            "WX IOC 576 / 120 LPM • PHASE ACQUIRE; STOP TO FINISH"
         state.listening && state.decoder == ImageDecoderSelection.SSTV ->
-            "R36 LIVE MANUAL SYNC; TAP AUTO, M1, OR M2 TO SWITCH"
+            "R36 LIVE MANUAL SYNC; TAP ??, M1, OR M2 TO SWITCH"
         state.listening && state.decoder == ImageDecoderSelection.MARTIN_M1 ->
-            "M1 LIVE MANUAL SYNC; TAP AUTO, R36, OR M2 TO SWITCH"
+            "M1 LIVE MANUAL SYNC; TAP ??, R36, OR M2 TO SWITCH"
         state.listening && state.decoder == ImageDecoderSelection.MARTIN_M2 ->
-            "M2 LIVE MANUAL SYNC; TAP AUTO, R36, OR M1 TO SWITCH"
-        state.listening -> "LISTENING FOR R36, M1, OR M2 VIS; MANUAL SWITCH AVAILABLE"
+            "M2 LIVE MANUAL SYNC; TAP ??, R36, OR M1 TO SWITCH"
+        state.listening -> "LISTENING FOR SSTV VIS; LIVE MANUAL SWITCH AVAILABLE"
         !microphonePermissionGranted -> "MIC PERMISSION REQUESTS ONLY AFTER LISTEN"
-        state.decoder == ImageDecoderSelection.WEFAX -> "WEFAX ENGINE FOLLOWS SSTV HARDWARE TEST"
-        else -> "R36 + M1 + M2 AUTO/LIVE MANUAL READY"
+        state.decoder == ImageDecoderSelection.WEFAX -> "WX IOC 576 / 120 LPM MANUAL READY"
+        else -> "R36 + M1 + M2 + S1 + S2 AUTO/LIVE MANUAL READY"
     }
 }
 

@@ -21,7 +21,7 @@ Use one large live image surface for both decoder families. Decoder selection ch
 Initial controls:
 
 ```text
-AUTO   R36   M1   M2   S1   S2   WEFAX
+??   R36   M1   M2   S1   S2   WX
 MIC    USB
 LISTEN / STOP
 ```
@@ -49,10 +49,11 @@ The status line should remain compact and show the selected input, decoder state
 
 ### WEFAX
 
-- Manual WEFAX selection for the first implementation.
+- Manual `WX` selection for the first implementation.
 - Initial mode: IOC 576 at 120 lines per minute.
 - Continuous progressive image area suitable for long transmissions.
-- Basic horizontal alignment from the existing Robot36 HF Fax work.
+- Acquire horizontal line phase and the received line-clock interval from repeated 120 LPM phasing edges when present, with an active-audio-only manual late-entry fallback.
+- Treat STOP as the end of the current manual fax and keep partial SAVE available after the first decoded line.
 - Later work may add 60/90 LPM, start/stop tone recognition, and manual skew correction.
 
 ## Audio Inputs
@@ -109,7 +110,7 @@ Keep this subsystem independent from the BLE radio repository. Image decoding mu
 1. Add the `IMG` tab, empty image surface, decoder state model, and microphone permission flow.
 2. Import the Robot36 decoder engine with license and attribution documentation.
 3. Decode SSTV automatically from the phone microphone and render progressively.
-4. Add manual IOC 576 / 120 LPM WEFAX into the same image surface.
+4. Add manual IOC 576 / 120 LPM WEFAX into the same image surface. **Implemented in dev.33, phase-acquired in dev.33r1, and robustly clock-corrected in dev.33r2.**
 5. Add USB audio device selection and routing.
 6. Add CLEAR, SAVE, and SHARE.
 7. Add lifecycle hardening, diagnostics, and hardware acceptance tests.
@@ -137,4 +138,4 @@ On the Pixel 6 with the ATS Mini speaker audible:
 5. Confirm automatic mode detection and progressive image rendering in Robot 36, Martin M1, Martin M2, Scottie S1, or Scottie S2.
 6. Stop capture, save the image, and open the saved PNG outside MemPuck.
 
-WEFAX and USB input follow only after this path is stable.
+Manual IOC 576 / 120 LPM WEFAX is now present in dev.33. USB input remains a later slice.

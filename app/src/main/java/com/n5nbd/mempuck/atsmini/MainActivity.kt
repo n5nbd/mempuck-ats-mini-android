@@ -1,6 +1,7 @@
 package com.n5nbd.mempuck.atsmini
 
 import android.Manifest
+import android.app.AlertDialog
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -36,6 +37,18 @@ import com.n5nbd.mempuck.atsmini.ui.VhfVfoStep
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        if (System.currentTimeMillis() >= BuildConfig.BUILD_EXPIRY_UTC_MILLIS) {
+            AlertDialog.Builder(this)
+                .setTitle("Development build expired")
+                .setMessage(
+                    "MemPuck ${BuildConfig.VERSION_NAME} expired on " +
+                        "${BuildConfig.BUILD_EXPIRY_DATE}. Install a newer test build.",
+                )
+                .setCancelable(false)
+                .setPositiveButton("CLOSE") { _, _ -> finish() }
+                .show()
+            return
+        }
         WindowCompat.setDecorFitsSystemWindows(window, false)
         setContent {
             val context = LocalContext.current

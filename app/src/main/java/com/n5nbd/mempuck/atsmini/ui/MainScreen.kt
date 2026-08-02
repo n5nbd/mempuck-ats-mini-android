@@ -2442,6 +2442,12 @@ private fun AboutContent(
             fontSize = if (compact) 13.sp else 15.sp,
         )
         Text(
+            text = "EXPIRES ${BuildConfig.BUILD_EXPIRY_DATE}",
+            color = colors.muted,
+            fontFamily = FontFamily.Monospace,
+            fontSize = if (compact) 11.sp else 12.sp,
+        )
+        Text(
             text = "BLE CONTROLLER • VFO • MEMORY",
             fontSize = if (compact) 12.sp else 14.sp,
             fontWeight = FontWeight.Bold,
