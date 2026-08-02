@@ -515,11 +515,13 @@ private fun statusDetail(
             "${state.detectedMode ?: "SSTV"} • ${frame.completedLines}/${frame.height} LINES$adaptive$buffer"
 
         state.listening && state.decoder == ImageDecoderSelection.SSTV ->
-            "LISTENING FOR SSTV SYNC; MANUAL RAW RECOVERY ENABLED$buffer"
-        state.listening -> "LISTENING FOR SSTV VIS HEADER$buffer"
+            "LISTENING FOR ROBOT 36 SYNC; MANUAL RAW RECOVERY ENABLED$buffer"
+        state.listening && state.decoder == ImageDecoderSelection.MARTIN_M1 ->
+            "LISTENING FOR MARTIN M1 SYNC; MANUAL RAW RECOVERY ENABLED$buffer"
+        state.listening -> "LISTENING FOR ROBOT 36 OR MARTIN M1 VIS HEADER$buffer"
         state.bufferedSamples > 0 -> "CAPTURE HELD FOR LATER MODE REPLAY$buffer"
         !microphonePermissionGranted -> "MIC PERMISSION REQUESTS ONLY AFTER LISTEN"
         state.decoder == ImageDecoderSelection.WEFAX -> "WEFAX ENGINE FOLLOWS SSTV HARDWARE TEST"
-        else -> "ROBOT 36 ADAPTIVE RAW/VIS READY"
+        else -> "ROBOT 36 + MARTIN M1 RAW/VIS READY"
     }
 }

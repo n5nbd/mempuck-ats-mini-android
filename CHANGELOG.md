@@ -1,3 +1,38 @@
+## 0.36.0-dev.26-r3 — Protect live audio from diagnostic trace I/O (2026-08-01)
+
+- Preserve the phone-tested AUTO switching behavior from dev.26-r2 and leave both Robot 36 and Martin M1 production decoder implementations unchanged.
+- Stop rendering and writing Robot 36 line-trace CSV/PNG files synchronously from the AudioRecord callback.
+- Retain compact line-probe metrics, the complete debug log, timeline, and raw grayscale frame diagnostics.
+- Exclude historical line-trace files from new diagnostic ZIPs so stale traces cannot be mistaken for the current pass.
+- Correct the observed line-120 microphone overrun that removed about 1,680 samples and forced the remaining Robot 36 frame into timeout-only reconstruction.
+- Updated About/build metadata to `0.36.0-dev.26-r3`; version code remains 65.
+
+## 0.36.0-dev.26-r2 — AUTO rearm after completed SSTV image (2026-08-01)
+
+- Preserve the completed image on the IMG surface and keep SAVE available after an AUTO-decoded transmission.
+- Release AUTO's selected decoder only after the completed-frame callback returns, then recreate both Robot 36 and Martin M1 acquisition candidates.
+- Allow the next transmission to select either VIS mode without CLEAR, leaving the IMG page, or restarting LISTEN.
+- Keep explicit `SSTV` and `M1` selections manually locked and leave both production decoder implementations untouched.
+- Updated About/build metadata to `0.36.0-dev.26-r2`; version code remains 65.
+
+## 0.36.0-dev.26-r1 — Martin M1 real-audio VIS acquisition correction (2026-08-01)
+
+- Preserve the phone-tested manual Martin M1 image path and the proven Robot 36 production files unchanged.
+- Keep the first 1900 Hz leader window as a broad plausibility gate instead of rejecting a real header when microphone/demodulator startup distorts that early measurement.
+- Validate the stable post-break leader with a bounded 150 Hz tolerance, then retain the existing leader-offset calibration, VIS tone checks, parity check, and exact VIS 44 requirement.
+- Add regression coverage for a degraded first leader window plus a shifted but internally valid Martin M1 header.
+- Updated About/build metadata to `0.36.0-dev.26-r1`; version code remains 65.
+
+## 0.36.0-dev.26 — 2026-08-01
+
+- Added an isolated Martin M1 SSTV decoder for VIS code 44 at 320 × 256.
+- Added `M1` as an explicit manual/raw decoder choice while preserving the existing `SSTV` manual Robot 36 path.
+- `AUTO` now runs Robot 36 and Martin M1 acquisition candidates in parallel until a valid VIS header selects one decoder.
+- Extended the temporary in-memory PCM recovery buffer to 130 seconds so a complete Martin M1 transmission can be retained locally.
+- Kept the live image theme-aware monochrome and the saved PNG in the decoder's original color.
+- Added Martin M1 timing, callback-boundary, progressive-frame, and RGB channel-order tests.
+- Left the proven Robot 36 decoder and mode production files byte-for-byte unchanged.
+
 ## 0.36.0-dev.25-r9 — Robot 36 chroma phase correction (2026-08-01)
 
 - Preserve the proven r7/r8 physical-sync, sliding-buffer, line-completion, pair-calibration, themed-preview, and camera-roll paths unchanged.

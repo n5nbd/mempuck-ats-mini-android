@@ -211,10 +211,6 @@ class ImageDiagnosticLogger(context: Context) {
             LOG_FILE_NAME,
             RAW_PGM_FILE_NAME,
             TIMELINE_FILE_NAME,
-            "IMG-ROBOT36-LINE-60.csv",
-            "IMG-ROBOT36-LINE-60.png",
-            "IMG-ROBOT36-LINE-120.csv",
-            "IMG-ROBOT36-LINE-120.png",
         )
         val output = java.io.ByteArrayOutputStream()
         ZipOutputStream(output).use { zip ->

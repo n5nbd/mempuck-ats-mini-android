@@ -7,6 +7,7 @@ import androidx.core.content.ContextCompat
 import com.n5nbd.mempuck.atsmini.img.audio.ImageAudioSource
 import com.n5nbd.mempuck.atsmini.img.audio.MicrophoneImageAudioSource
 import com.n5nbd.mempuck.atsmini.img.audio.PcmRingBuffer
+import com.n5nbd.mempuck.atsmini.img.decoder.robot36.MartinM1Decoder
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.Robot36Decoder
 import com.n5nbd.mempuck.atsmini.img.diagnostics.ImageDiagnosticLogger
 import com.n5nbd.mempuck.atsmini.img.model.DecodedImageFrame
@@ -25,12 +26,20 @@ class ImageDecoderRepository(
     context: Context,
     private val microphoneSource: ImageAudioSource = MicrophoneImageAudioSource(),
 ) {
+    private enum class ActiveSstvDecoder {
+        ROBOT_36,
+        MARTIN_M1,
+    }
+
     private val applicationContext = context.applicationContext
     private val sessionLock = Any()
     private val _state = MutableStateFlow(ImageDecoderState())
     private val diagnosticLogger = ImageDiagnosticLogger(applicationContext)
 
     private var robot36Decoder: Robot36Decoder? = null
+    private var martinM1Decoder: MartinM1Decoder? = null
+    private var activeDecoder: ActiveSstvDecoder? = null
+    private var autoRearmPending = false
     private var captureBuffer: PcmRingBuffer? = null
     private var activeSampleRateHz: Int? = null
     private var frameRevision = 0L
@@ -40,10 +49,21 @@ class ImageDecoderRepository(
 
     fun selectDecoder(decoder: ImageDecoderSelection) {
         if (state.value.listening) stopListening()
+        synchronized(sessionLock) {
+            robot36Decoder = null
+            martinM1Decoder = null
+            activeDecoder = null
+            autoRearmPending = false
+            activeSampleRateHz = null
+        }
         _state.update { current ->
             current.copy(
                 decoder = decoder,
                 signal = ImageSignalState.WAITING,
+                detectedMode = null,
+                frequencyCorrectionHz = null,
+                decoderConfidence = 0,
+                image = null,
                 error = null,
             )
         }
@@ -79,6 +99,9 @@ class ImageDecoderRepository(
 
         synchronized(sessionLock) {
             robot36Decoder = null
+            martinM1Decoder = null
+            activeDecoder = null
+            autoRearmPending = false
             captureBuffer = null
             activeSampleRateHz = null
             diagnosticStarted = false
@@ -128,7 +151,8 @@ class ImageDecoderRepository(
     fun stopListening() {
         microphoneSource.stop()
         synchronized(sessionLock) {
-            robot36Decoder?.finishCapture("STOP_OR_LIFECYCLE")
+            finishActiveDecoderLocked("STOP_OR_LIFECYCLE")
+            autoRearmPending = false
         }
         finishDiagnostics("STOP_OR_LIFECYCLE")
         _state.update { current ->
@@ -145,11 +169,14 @@ class ImageDecoderRepository(
 
     fun clearImage() {
         synchronized(sessionLock) {
-            robot36Decoder?.finishCapture("CLEAR")
+            finishActiveDecoderLocked("CLEAR")
         }
         finishDiagnostics("CLEAR")
         synchronized(sessionLock) {
             robot36Decoder = null
+            martinM1Decoder = null
+            activeDecoder = null
+            autoRearmPending = false
             captureBuffer?.clear()
             if (!state.value.listening) {
                 captureBuffer = null
@@ -201,7 +228,7 @@ class ImageDecoderRepository(
             diagnosticLogger.audio(samples, safeCount)
             captureBuffer?.append(samples, safeCount)
             bufferedSamples = captureBuffer?.size ?: 0
-            robot36Decoder?.process(samples, safeCount)
+            processSelectedDecodersLocked(samples, safeCount)
         }
 
         _state.update { active ->
@@ -218,6 +245,50 @@ class ImageDecoderRepository(
         }
     }
 
+    private fun processSelectedDecodersLocked(samples: ShortArray, count: Int) {
+        when (state.value.decoder) {
+            ImageDecoderSelection.AUTO -> when (activeDecoder) {
+                ActiveSstvDecoder.ROBOT_36 -> robot36Decoder?.process(samples, count)
+                ActiveSstvDecoder.MARTIN_M1 -> martinM1Decoder?.process(samples, count)
+                null -> {
+                    robot36Decoder?.process(samples, count)
+                    if (activeDecoder == null) {
+                        martinM1Decoder?.process(samples, count)
+                    }
+                }
+            }
+
+            ImageDecoderSelection.SSTV -> robot36Decoder?.process(samples, count)
+            ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder?.process(samples, count)
+            ImageDecoderSelection.WEFAX -> Unit
+        }
+
+        // A completed AUTO frame must remain visible and savable, but the decoder
+        // claim must not remain latched. Recreate both acquisition candidates only
+        // after the callback stack returns so the next transmission can choose a
+        // different VIS mode without CLEAR or leaving the IMG page.
+        if (autoRearmPending) {
+            rearmAutoDetectionLocked()
+        }
+    }
+
+    private fun finishActiveDecoderLocked(reason: String) {
+        when (state.value.decoder) {
+            ImageDecoderSelection.AUTO -> when (activeDecoder) {
+                ActiveSstvDecoder.ROBOT_36 -> robot36Decoder?.finishCapture(reason)
+                ActiveSstvDecoder.MARTIN_M1 -> martinM1Decoder?.finishCapture(reason)
+                null -> {
+                    robot36Decoder?.finishCapture(reason)
+                    martinM1Decoder?.finishCapture(reason)
+                }
+            }
+
+            ImageDecoderSelection.SSTV -> robot36Decoder?.finishCapture(reason)
+            ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder?.finishCapture(reason)
+            ImageDecoderSelection.WEFAX -> Unit
+        }
+    }
+
     private fun ensurePipeline(sampleRateHz: Int) {
         synchronized(sessionLock) {
             ensurePipelineLocked(sampleRateHz)
@@ -225,15 +296,17 @@ class ImageDecoderRepository(
     }
 
     private fun ensurePipelineLocked(sampleRateHz: Int) {
-        if (
-            activeSampleRateHz == sampleRateHz &&
-            captureBuffer != null &&
-            robot36Decoder != null
-        ) {
+        if (activeSampleRateHz == sampleRateHz && captureBuffer != null && decoderPipelineReady()) {
             return
         }
         activeSampleRateHz = sampleRateHz
         captureBuffer = PcmRingBuffer(sampleRateHz * SSTV_CAPTURE_SECONDS)
+        activeDecoder = when (state.value.decoder) {
+            ImageDecoderSelection.SSTV -> ActiveSstvDecoder.ROBOT_36
+            ImageDecoderSelection.MARTIN_M1 -> ActiveSstvDecoder.MARTIN_M1
+            else -> null
+        }
+        autoRearmPending = false
         if (!diagnosticStarted) {
             diagnosticLogger.begin(
                 sampleRateHz = sampleRateHz,
@@ -242,123 +315,272 @@ class ImageDecoderRepository(
             )
             diagnosticStarted = true
         }
+
+        robot36Decoder = when (state.value.decoder) {
+            ImageDecoderSelection.AUTO,
+            ImageDecoderSelection.SSTV,
+            -> Robot36Decoder(
+                sampleRateHz,
+                robot36Listener(),
+                state.value.decoder == ImageDecoderSelection.SSTV,
+            )
+
+            else -> null
+        }
+        martinM1Decoder = when (state.value.decoder) {
+            ImageDecoderSelection.AUTO,
+            ImageDecoderSelection.MARTIN_M1,
+            -> MartinM1Decoder(
+                sampleRateHz,
+                martinM1Listener(),
+                state.value.decoder == ImageDecoderSelection.MARTIN_M1,
+            )
+
+            else -> null
+        }
+    }
+
+    private fun decoderPipelineReady(): Boolean = when (state.value.decoder) {
+        ImageDecoderSelection.AUTO -> robot36Decoder != null && martinM1Decoder != null
+        ImageDecoderSelection.SSTV -> robot36Decoder != null
+        ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder != null
+        ImageDecoderSelection.WEFAX -> true
+    }
+
+    private fun rearmAutoDetectionLocked() {
+        if (!autoRearmPending || state.value.decoder != ImageDecoderSelection.AUTO) {
+            autoRearmPending = false
+            return
+        }
+        val sampleRateHz = activeSampleRateHz ?: run {
+            autoRearmPending = false
+            return
+        }
+
+        autoRearmPending = false
+        activeDecoder = null
         robot36Decoder = Robot36Decoder(
             sampleRateHz,
-            object : Robot36Decoder.Listener {
-                override fun onModeDetected(modeName: String) {
-                    _state.update { current ->
-                        current.copy(
-                            signal = ImageSignalState.DECODING,
-                            detectedMode = modeName,
-                            error = null,
-                        )
-                    }
-                }
-
-
-                override fun onAdaptiveStatus(
-                    modeName: String,
-                    correctionHz: Int,
-                    confidence: Int,
-                ) {
-                    _state.update { current ->
-                        current.copy(
-                            signal = ImageSignalState.DECODING,
-                            detectedMode = modeName,
-                            frequencyCorrectionHz = correctionHz,
-                            decoderConfidence = confidence.coerceIn(0, 100),
-                            error = null,
-                        )
-                    }
-                }
-
-                override fun onFrame(
-                    width: Int,
-                    height: Int,
-                    argbPixels: IntArray,
-                    completedLines: Int,
-                    complete: Boolean,
-                ) {
-                    frameRevision += 1
-                    val frame = DecodedImageFrame(
-                        width = width,
-                        height = height,
-                        argbPixels = argbPixels.copyOf(),
-                        completedLines = completedLines,
-                        revision = frameRevision,
-                    )
-                    _state.update { current ->
-                        current.copy(
-                            signal = if (complete) {
-                                ImageSignalState.COMPLETE
-                            } else {
-                                ImageSignalState.DECODING
-                            },
-                            detectedMode = current.detectedMode ?: "ROBOT 36",
-                            image = frame,
-                            error = null,
-                        )
-                    }
-                }
-
-                override fun onDiagnostic(message: String) {
-                    diagnosticLogger.decoder(message)
-                }
-
-                override fun onLineTrace(
-                    lineNumber: Int,
-                    sampleIndices: IntArray,
-                    rawFrequenciesHz: FloatArray,
-                    correctedFrequenciesHz: FloatArray,
-                    grayValues: IntArray,
-                ) {
-                    diagnosticLogger.writeLineTrace(
-                        lineNumber,
-                        sampleIndices,
-                        rawFrequenciesHz,
-                        correctedFrequenciesHz,
-                        grayValues,
-                    ).onSuccess { files ->
-                        diagnosticLogger.decoder("ROBOT36 line_trace_saved line=$lineNumber files=${files.joinToString(",")}")
-                    }.onFailure { error ->
-                        diagnosticLogger.decoder(
-                            "ROBOT36 line_trace_failed line=$lineNumber error=${error.message ?: error::class.java.simpleName}",
-                        )
-                    }
-                }
-
-                override fun onTimeline(text: String) {
-                    diagnosticLogger.writeTimeline(text)
-                        .onSuccess { fileName ->
-                            diagnosticLogger.decoder("ROBOT36 timeline_saved file=$fileName")
-                        }
-                        .onFailure { error ->
-                            diagnosticLogger.decoder(
-                                "ROBOT36 timeline_failed error=${error.message ?: error::class.java.simpleName}",
-                            )
-                        }
-                }
-
-                override fun onRawGrayscaleFrame(
-                    width: Int,
-                    height: Int,
-                    grayPixels: ByteArray,
-                    complete: Boolean,
-                ) {
-                    if (!complete) return
-                    diagnosticLogger.writeRawPgm(width, height, grayPixels)
-                        .onSuccess { fileName ->
-                            diagnosticLogger.decoder("ROBOT36 raw_pgm_saved file=$fileName width=$width height=$height")
-                        }
-                        .onFailure { error ->
-                            diagnosticLogger.decoder(
-                                "ROBOT36 raw_pgm_failed error=${error.message ?: error::class.java.simpleName}",
-                            )
-                        }
-                }
-            },
-            state.value.decoder == ImageDecoderSelection.SSTV,
+            robot36Listener(),
+            false,
         )
+        martinM1Decoder = MartinM1Decoder(
+            sampleRateHz,
+            martinM1Listener(),
+            false,
+        )
+        diagnosticLogger.decoder(
+            "AUTO rearmed after complete frame; retained displayed image and PCM buffer",
+        )
+    }
+
+    private fun claimDecoder(candidate: ActiveSstvDecoder): Boolean = when (state.value.decoder) {
+        ImageDecoderSelection.AUTO -> {
+            if (activeDecoder == null) activeDecoder = candidate
+            activeDecoder == candidate
+        }
+
+        ImageDecoderSelection.SSTV -> candidate == ActiveSstvDecoder.ROBOT_36
+        ImageDecoderSelection.MARTIN_M1 -> candidate == ActiveSstvDecoder.MARTIN_M1
+        ImageDecoderSelection.WEFAX -> false
+    }
+
+    private fun robot36Listener(): Robot36Decoder.Listener = object : Robot36Decoder.Listener {
+        override fun onModeDetected(modeName: String) {
+            modeDetected(ActiveSstvDecoder.ROBOT_36, modeName)
+        }
+
+        override fun onAdaptiveStatus(modeName: String, correctionHz: Int, confidence: Int) {
+            adaptiveStatus(ActiveSstvDecoder.ROBOT_36, modeName, correctionHz, confidence)
+        }
+
+        override fun onFrame(
+            width: Int,
+            height: Int,
+            argbPixels: IntArray,
+            completedLines: Int,
+            complete: Boolean,
+        ) {
+            decodedFrame(
+                ActiveSstvDecoder.ROBOT_36,
+                "ROBOT 36",
+                width,
+                height,
+                argbPixels,
+                completedLines,
+                complete,
+            )
+        }
+
+        override fun onDiagnostic(message: String) {
+            diagnosticLogger.decoder(message)
+        }
+
+        override fun onLineTrace(
+            lineNumber: Int,
+            sampleIndices: IntArray,
+            rawFrequenciesHz: FloatArray,
+            correctedFrequenciesHz: FloatArray,
+            grayValues: IntArray,
+        ) {
+            // The decoder invokes this callback synchronously on the AudioRecord reader
+            // thread. Rendering and writing the diagnostic CSV/PNG here can overrun the
+            // microphone buffer and remove samples from the live stream. Keep the compact
+            // line_probe metrics in IMG-DEBUG.txt, but never perform SAF or bitmap I/O in
+            // the live callback.
+            diagnosticLogger.decoder(
+                "ROBOT36 line_trace_skipped line=$lineNumber reason=protect_live_audio",
+            )
+        }
+
+        override fun onTimeline(text: String) {
+            writeTimeline("ROBOT36", text)
+        }
+
+        override fun onRawGrayscaleFrame(
+            width: Int,
+            height: Int,
+            grayPixels: ByteArray,
+            complete: Boolean,
+        ) {
+            writeRawFrame("ROBOT36", width, height, grayPixels, complete)
+        }
+    }
+
+    private fun martinM1Listener(): MartinM1Decoder.Listener = object : MartinM1Decoder.Listener {
+        override fun onModeDetected(modeName: String) {
+            modeDetected(ActiveSstvDecoder.MARTIN_M1, modeName)
+        }
+
+        override fun onAdaptiveStatus(modeName: String, correctionHz: Int, confidence: Int) {
+            adaptiveStatus(ActiveSstvDecoder.MARTIN_M1, modeName, correctionHz, confidence)
+        }
+
+        override fun onFrame(
+            width: Int,
+            height: Int,
+            argbPixels: IntArray,
+            completedLines: Int,
+            complete: Boolean,
+        ) {
+            decodedFrame(
+                ActiveSstvDecoder.MARTIN_M1,
+                "MARTIN M1",
+                width,
+                height,
+                argbPixels,
+                completedLines,
+                complete,
+            )
+        }
+
+        override fun onDiagnostic(message: String) {
+            diagnosticLogger.decoder(message)
+        }
+
+        override fun onTimeline(text: String) {
+            writeTimeline("MARTIN1", text)
+        }
+
+        override fun onRawGrayscaleFrame(
+            width: Int,
+            height: Int,
+            grayPixels: ByteArray,
+            complete: Boolean,
+        ) {
+            writeRawFrame("MARTIN1", width, height, grayPixels, complete)
+        }
+    }
+
+    private fun modeDetected(candidate: ActiveSstvDecoder, modeName: String) {
+        if (!claimDecoder(candidate)) return
+        _state.update { current ->
+            current.copy(
+                signal = ImageSignalState.DECODING,
+                detectedMode = modeName,
+                error = null,
+            )
+        }
+    }
+
+    private fun adaptiveStatus(
+        candidate: ActiveSstvDecoder,
+        modeName: String,
+        correctionHz: Int,
+        confidence: Int,
+    ) {
+        if (!claimDecoder(candidate)) return
+        _state.update { current ->
+            current.copy(
+                signal = ImageSignalState.DECODING,
+                detectedMode = modeName,
+                frequencyCorrectionHz = correctionHz,
+                decoderConfidence = confidence.coerceIn(0, 100),
+                error = null,
+            )
+        }
+    }
+
+    private fun decodedFrame(
+        candidate: ActiveSstvDecoder,
+        fallbackModeName: String,
+        width: Int,
+        height: Int,
+        argbPixels: IntArray,
+        completedLines: Int,
+        complete: Boolean,
+    ) {
+        if (!claimDecoder(candidate)) return
+        if (complete && state.value.decoder == ImageDecoderSelection.AUTO) {
+            autoRearmPending = true
+        }
+        frameRevision += 1
+        val frame = DecodedImageFrame(
+            width = width,
+            height = height,
+            argbPixels = argbPixels.copyOf(),
+            completedLines = completedLines,
+            revision = frameRevision,
+        )
+        _state.update { current ->
+            current.copy(
+                signal = if (complete) ImageSignalState.COMPLETE else ImageSignalState.DECODING,
+                detectedMode = current.detectedMode ?: fallbackModeName,
+                image = frame,
+                error = null,
+            )
+        }
+    }
+
+    private fun writeTimeline(prefix: String, text: String) {
+        diagnosticLogger.writeTimeline(text)
+            .onSuccess { fileName ->
+                diagnosticLogger.decoder("$prefix timeline_saved file=$fileName")
+            }
+            .onFailure { error ->
+                diagnosticLogger.decoder(
+                    "$prefix timeline_failed error=${error.message ?: error::class.java.simpleName}",
+                )
+            }
+    }
+
+    private fun writeRawFrame(
+        prefix: String,
+        width: Int,
+        height: Int,
+        grayPixels: ByteArray,
+        complete: Boolean,
+    ) {
+        if (!complete) return
+        diagnosticLogger.writeRawPgm(width, height, grayPixels)
+            .onSuccess { fileName ->
+                diagnosticLogger.decoder("$prefix raw_pgm_saved file=$fileName width=$width height=$height")
+            }
+            .onFailure { error ->
+                diagnosticLogger.decoder(
+                    "$prefix raw_pgm_failed error=${error.message ?: error::class.java.simpleName}",
+                )
+            }
     }
 
     private fun hasMicrophonePermission(): Boolean =
@@ -403,6 +625,8 @@ class ImageDecoderRepository(
     }
 
     private companion object {
-        const val SSTV_CAPTURE_SECONDS = 60
+        // Martin M1 lasts about 115 seconds. Keep one complete transmission in RAM
+        // for the later swipe/replay slice without writing raw audio to storage.
+        const val SSTV_CAPTURE_SECONDS = 130
     }
 }
