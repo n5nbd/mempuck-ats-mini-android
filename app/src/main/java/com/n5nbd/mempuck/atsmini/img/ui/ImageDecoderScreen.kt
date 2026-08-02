@@ -21,8 +21,11 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -51,6 +54,7 @@ import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.n5nbd.mempuck.atsmini.img.model.DecodedImageFrame
 import com.n5nbd.mempuck.atsmini.img.model.ImageAudioInput
 import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderSelection
@@ -109,11 +113,25 @@ fun ImageDecoderScreen(
     }
 
     val context = LocalContext.current
-    val savableFrame = state.image?.takeIf { frame ->
+    val sourceFrame = state.image
+    var acceptedCorrection by remember(sourceFrame?.revision) {
+        mutableStateOf(ImageCorrection())
+    }
+    var correctionEditorOpen by remember(sourceFrame?.revision) {
+        mutableStateOf(false)
+    }
+    val workingFrame = remember(sourceFrame?.revision, acceptedCorrection) {
+        sourceFrame?.let { frame -> applyImageCorrection(frame, acceptedCorrection) }
+    }
+    val savableFrame = workingFrame?.takeIf { frame ->
         frame.completedLines > 0
     }
-    val completedFrame = state.image?.takeIf { frame ->
+    val completedSourceFrame = sourceFrame?.takeIf { frame ->
         state.signal == ImageSignalState.COMPLETE &&
+            (frame.continuous || frame.completedLines >= frame.height)
+    }
+    val completedFrame = workingFrame?.takeIf { frame ->
+        completedSourceFrame != null &&
             (frame.continuous || frame.completedLines >= frame.height)
     }
 
@@ -136,7 +154,7 @@ fun ImageDecoderScreen(
             border = BorderStroke(1.dp, palette.foreground),
             shape = ImagePanelShape,
         ) {
-            val frame = state.image
+            val frame = workingFrame
             if (frame == null) {
                 Box(contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -159,7 +177,7 @@ fun ImageDecoderScreen(
                 }
             } else {
                 val preview = remember(
-                    frame.revision,
+                    frame,
                     sourceColorPreview,
                     palette.background,
                     palette.foreground,
@@ -175,6 +193,11 @@ fun ImageDecoderScreen(
                     frame = frame,
                     palette = palette,
                     contentDescription = state.detectedMode ?: "Decoded image",
+                    onDoubleTap = if (completedSourceFrame != null && !state.listening) {
+                        { correctionEditorOpen = true }
+                    } else {
+                        null
+                    },
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(2.dp),
@@ -319,6 +342,20 @@ fun ImageDecoderScreen(
             }
         }
     }
+
+    if (correctionEditorOpen && completedSourceFrame != null && !state.listening) {
+        ImageCorrectionDialog(
+            frame = completedSourceFrame,
+            initialCorrection = acceptedCorrection,
+            sourceColorPreview = sourceColorPreview,
+            palette = palette,
+            onCancel = { correctionEditorOpen = false },
+            onAccept = { correction ->
+                acceptedCorrection = correction
+                correctionEditorOpen = false
+            },
+        )
+    }
 }
 
 
@@ -336,6 +373,7 @@ private fun DecodedImageViewport(
     frame: DecodedImageFrame,
     palette: ImageDecoderPalette,
     contentDescription: String,
+    onDoubleTap: (() -> Unit)? = null,
     modifier: Modifier = Modifier,
 ) {
     val image = remember(preview) { preview.asImageBitmap() }
@@ -378,10 +416,12 @@ private fun DecodedImageViewport(
         imageWidth,
         imageHeight,
         frame.continuous,
+        onDoubleTap,
     ) {
         detectTapGestures(
-            // Reserved for the completed-image correction editor in a later slice.
-            onDoubleTap = { },
+            onDoubleTap = onDoubleTap?.let { callback ->
+                { _ -> callback() }
+            },
             onTap = { tap ->
                 val currentPlacement = placement
                 if (currentPlacement != null && viewMode == ImageViewMode.FIT) {
@@ -533,6 +573,228 @@ private fun DecodedImageViewport(
             }
         }
     }
+}
+
+@Composable
+private fun ImageCorrectionDialog(
+    frame: DecodedImageFrame,
+    initialCorrection: ImageCorrection,
+    sourceColorPreview: Boolean,
+    palette: ImageDecoderPalette,
+    onCancel: () -> Unit,
+    onAccept: (ImageCorrection) -> Unit,
+) {
+    var draft by remember(frame.revision, initialCorrection) {
+        mutableStateOf(initialCorrection)
+    }
+    val (previewFrame, previewScale) = remember(frame.revision) {
+        correctionPreviewFrame(frame)
+    }
+    val correctedPreviewFrame = remember(previewFrame, previewScale, draft) {
+        applyImageCorrection(previewFrame, draft.scaled(previewScale))
+    }
+    val previewBitmap = remember(
+        correctedPreviewFrame,
+        sourceColorPreview,
+        palette.background,
+        palette.foreground,
+    ) {
+        if (sourceColorPreview) {
+            colorImage(correctedPreviewFrame, palette.background.toArgb())
+        } else {
+            monochromePreview(correctedPreviewFrame, palette)
+        }
+    }
+    val skewLimit = (frame.width * 0.30f).coerceIn(20f, 400f)
+    val offsetLimit = (frame.width / 2f).coerceAtLeast(1f)
+
+    Dialog(onDismissRequest = onCancel) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 520.dp),
+            color = palette.background,
+            contentColor = palette.foreground,
+            border = BorderStroke(1.dp, palette.foreground),
+            shape = ImagePanelShape,
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "IMAGE CORRECTION",
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 1.sp,
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                CorrectionPreview(
+                    bitmap = previewBitmap,
+                    palette = palette,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(170.dp),
+                )
+
+                Spacer(Modifier.height(6.dp))
+
+                ImageCorrectionSlider(
+                    label = "SKEW",
+                    valueText = "${draft.skewPixels.roundToInt()} px",
+                    value = draft.skewPixels,
+                    valueRange = -skewLimit..skewLimit,
+                    palette = palette,
+                    onValueChange = { value ->
+                        draft = draft.copy(skewPixels = value.roundToInt().toFloat())
+                    },
+                )
+                ImageCorrectionSlider(
+                    label = "OFFSET",
+                    valueText = "${draft.offsetPixels.roundToInt()} px",
+                    value = draft.offsetPixels,
+                    valueRange = -offsetLimit..offsetLimit,
+                    palette = palette,
+                    onValueChange = { value ->
+                        draft = draft.copy(offsetPixels = value.roundToInt().toFloat())
+                    },
+                )
+                ImageCorrectionSlider(
+                    label = "BRIGHT",
+                    valueText = signedValue(draft.brightness),
+                    value = draft.brightness,
+                    valueRange = -100f..100f,
+                    palette = palette,
+                    onValueChange = { value ->
+                        draft = draft.copy(brightness = value.roundToInt().toFloat())
+                    },
+                )
+                ImageCorrectionSlider(
+                    label = "CONTRAST",
+                    valueText = signedValue(draft.contrast),
+                    value = draft.contrast,
+                    valueRange = -80f..100f,
+                    palette = palette,
+                    onValueChange = { value ->
+                        draft = draft.copy(contrast = value.roundToInt().toFloat())
+                    },
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    ImageButton(
+                        text = "RESET",
+                        selected = false,
+                        palette = palette,
+                        enabled = !draft.neutral,
+                        onClick = { draft = ImageCorrection() },
+                        modifier = Modifier.weight(1f),
+                    )
+                    ImageButton(
+                        text = "CANCEL",
+                        selected = false,
+                        palette = palette,
+                        enabled = true,
+                        onClick = onCancel,
+                        modifier = Modifier.weight(1f),
+                    )
+                    ImageButton(
+                        text = "OK",
+                        selected = true,
+                        palette = palette,
+                        enabled = true,
+                        onClick = { onAccept(draft) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CorrectionPreview(
+    bitmap: Bitmap,
+    palette: ImageDecoderPalette,
+    modifier: Modifier = Modifier,
+) {
+    val image = remember(bitmap) { bitmap.asImageBitmap() }
+    Canvas(
+        modifier = modifier
+            .background(palette.background)
+            .border(1.dp, palette.foreground),
+    ) {
+        val placement = fitPlacement(
+            viewportWidth = size.width,
+            viewportHeight = size.height,
+            imageWidth = bitmap.width,
+            imageHeight = bitmap.height,
+            bottomAligned = false,
+        )
+        drawImage(
+            image = image,
+            srcOffset = IntOffset.Zero,
+            srcSize = IntSize(image.width, image.height),
+            dstOffset = IntOffset(
+                placement.left.roundToInt(),
+                placement.top.roundToInt(),
+            ),
+            dstSize = IntSize(
+                placement.width.roundToInt().coerceAtLeast(1),
+                placement.height.roundToInt().coerceAtLeast(1),
+            ),
+            filterQuality = FilterQuality.Medium,
+        )
+    }
+}
+
+@Composable
+private fun ImageCorrectionSlider(
+    label: String,
+    valueText: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    palette: ImageDecoderPalette,
+    onValueChange: (Float) -> Unit,
+) {
+    Column {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = label,
+                modifier = Modifier.weight(1f),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Black,
+            )
+            Text(
+                text = valueText,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Slider(
+            value = value.coerceIn(valueRange.start, valueRange.endInclusive),
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            colors = SliderDefaults.colors(
+                thumbColor = palette.foreground,
+                activeTrackColor = palette.foreground,
+                inactiveTrackColor = palette.muted,
+            ),
+        )
+    }
+}
+
+private fun signedValue(value: Float): String {
+    val rounded = value.roundToInt()
+    return if (rounded > 0) "+$rounded" else rounded.toString()
 }
 
 @Composable

@@ -1,3 +1,14 @@
+## 0.36.0-dev.35 — Completed-image correction editor (2026-08-02)
+
+- Open a non-destructive correction editor by double-tapping a completed IMG frame while LISTEN is inactive.
+- Add live-preview SKEW, horizontal OFFSET, BRIGHT, and CONTRAST sliders with RESET, CANCEL, and OK actions.
+- Implement SKEW as a line-by-line horizontal shear and OFFSET as a circular horizontal wrap, preserving every decoded pixel rather than rotating or cropping the image.
+- Keep the original decoder frame untouched; CANCEL retains the previously accepted rendering, while OK updates the working image and can be reopened for further revision.
+- Apply accepted corrections to the displayed image and to subsequent SAVE and SHARE output.
+- Use a downsampled live preview while dragging sliders, then render the accepted correction at full decoded resolution.
+- Preserve single-tap FIT/ZOOM, drag panning, LISTEN screen-awake behavior, WEFAX clock correction, all SSTV decoders, and completed-image replacement protection.
+- Keep the development expiry at 2026-09-15 and identify the test build as `0.36.0-dev.35`, version code 74.
+
 ## 0.36.0-dev.34 — IMG FIT/ZOOM and LISTEN screen-awake (2026-08-02)
 
 - Add single-tap FIT/ZOOM switching on the shared SSTV/WEFAX image surface.
