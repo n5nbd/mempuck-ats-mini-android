@@ -1,3 +1,13 @@
+## 0.36.0-dev.30 — Completed-image protection (2026-08-02)
+
+- Preserve any completed or useful partial IMG frame when `AUTO`, `R36`, `M1`, or `M2` is selected accidentally or intentionally.
+- Keep the protected frame visible and SAVE/SHARE-capable while the replacement decoder is only armed, waiting for VIS, or reporting acquisition metadata.
+- Replace the protected frame only after the newly selected decoder publishes its first actual image line.
+- Apply the same protection when starting a new LISTEN session and when AUTO rearms after a completed transmission.
+- Keep CLEAR as the immediate, explicit way to discard the displayed image.
+- Leave Robot 36, Martin M1, Martin M2, source-color SAVE, and theme-preview rendering unchanged.
+- Updated About/build metadata to `0.36.0-dev.30`, version code 69.
+
 ## 0.36.0-dev.29 — Light-theme source-color IMG preview (2026-08-02)
 
 - Render the decoder's original reconstructed color frame directly on the IMG surface when the app is using the Light theme.

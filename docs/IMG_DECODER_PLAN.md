@@ -44,6 +44,7 @@ The status line should remain compact and show the selected input, decoder state
 - Render progressively into the shared image surface.
 - Show the original reconstructed color frame in the Light theme; retain theme-aware monochrome rendering in Dark and Hue themes.
 - Allow completed or partial images with at least one decoded line to be saved in original decoded color.
+- Protect a completed or useful partial image across mode changes, LISTEN restarts, and AUTO rearming; replace it only when the newly armed decoder publishes its first image line or when CLEAR is pressed.
 - Preserve the detected mode in image metadata when saving.
 
 ### WEFAX

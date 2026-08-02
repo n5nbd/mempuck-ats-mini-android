@@ -47,6 +47,7 @@ class ImageDecoderRepository(
     private var activeSampleRateHz: Int? = null
     private var frameRevision = 0L
     private var diagnosticStarted = false
+    private val imageReplacementProtection = ImageReplacementProtection()
 
     val state: StateFlow<ImageDecoderState> = _state.asStateFlow()
 
@@ -59,14 +60,58 @@ class ImageDecoderRepository(
                 if (decoder == ImageDecoderSelection.WEFAX || decoder == current.decoder) return
 
                 val sampleRateHz = activeSampleRateHz ?: current.sampleRateHz
+                imageReplacementProtection.arm(current.image?.completedLines ?: 0)
                 robot36Decoder = null
                 martinM1Decoder = null
                 martinM2Decoder = null
                 activeDecoder = null
                 autoRearmPending = false
-                frameRevision += 1
 
                 _state.update {
+                    if (imageReplacementProtection.active) {
+                        it.copy(
+                            decoder = decoder,
+                            error = null,
+                        )
+                    } else {
+                        it.copy(
+                            decoder = decoder,
+                            signal = ImageSignalState.WAITING,
+                            detectedMode = null,
+                            frequencyCorrectionHz = null,
+                            decoderConfidence = 0,
+                            image = null,
+                            error = null,
+                        )
+                    }
+                }
+
+                if (sampleRateHz != null) {
+                    installDecoderPipelineLocked(decoder, sampleRateHz)
+                }
+                diagnosticLogger.decoder(
+                    "LIVE decoder_switch from=${current.decoder.label} to=${decoder.label} " +
+                        "received_samples=${current.receivedSamples} " +
+                        "protected_image=${imageReplacementProtection.active}",
+                )
+                return
+            }
+
+            imageReplacementProtection.arm(current.image?.completedLines ?: 0)
+            robot36Decoder = null
+            martinM1Decoder = null
+            martinM2Decoder = null
+            activeDecoder = null
+            autoRearmPending = false
+            activeSampleRateHz = null
+
+            _state.update {
+                if (imageReplacementProtection.active) {
+                    it.copy(
+                        decoder = decoder,
+                        error = null,
+                    )
+                } else {
                     it.copy(
                         decoder = decoder,
                         signal = ImageSignalState.WAITING,
@@ -77,34 +122,7 @@ class ImageDecoderRepository(
                         error = null,
                     )
                 }
-
-                if (sampleRateHz != null) {
-                    installDecoderPipelineLocked(decoder, sampleRateHz)
-                }
-                diagnosticLogger.decoder(
-                    "LIVE decoder_switch from=${current.decoder.label} to=${decoder.label} " +
-                        "received_samples=${current.receivedSamples}",
-                )
-                return
             }
-
-            robot36Decoder = null
-            martinM1Decoder = null
-            martinM2Decoder = null
-            activeDecoder = null
-            autoRearmPending = false
-            activeSampleRateHz = null
-        }
-        _state.update { current ->
-            current.copy(
-                decoder = decoder,
-                signal = ImageSignalState.WAITING,
-                detectedMode = null,
-                frequencyCorrectionHz = null,
-                decoderConfidence = 0,
-                image = null,
-                error = null,
-            )
         }
     }
 
@@ -137,6 +155,7 @@ class ImageDecoderRepository(
         }
 
         synchronized(sessionLock) {
+            imageReplacementProtection.arm(current.image?.completedLines ?: 0)
             robot36Decoder = null
             martinM1Decoder = null
             martinM2Decoder = null
@@ -145,21 +164,33 @@ class ImageDecoderRepository(
             captureBuffer = null
             activeSampleRateHz = null
             diagnosticStarted = false
-            frameRevision += 1
+            if (!imageReplacementProtection.active) {
+                frameRevision += 1
+            }
         }
         _state.update {
-            it.copy(
-                session = ImageDecoderSession.STARTING,
-                signal = ImageSignalState.WAITING,
-                sampleRateHz = null,
-                receivedSamples = 0L,
-                bufferedSamples = 0,
-                detectedMode = null,
-                frequencyCorrectionHz = null,
-                decoderConfidence = 0,
-                image = null,
-                error = null,
-            )
+            if (imageReplacementProtection.active) {
+                it.copy(
+                    session = ImageDecoderSession.STARTING,
+                    sampleRateHz = null,
+                    receivedSamples = 0L,
+                    bufferedSamples = 0,
+                    error = null,
+                )
+            } else {
+                it.copy(
+                    session = ImageDecoderSession.STARTING,
+                    signal = ImageSignalState.WAITING,
+                    sampleRateHz = null,
+                    receivedSamples = 0L,
+                    bufferedSamples = 0,
+                    detectedMode = null,
+                    frequencyCorrectionHz = null,
+                    decoderConfidence = 0,
+                    image = null,
+                    error = null,
+                )
+            }
         }
 
         val start = microphoneSource.start(
@@ -218,6 +249,7 @@ class ImageDecoderRepository(
             martinM2Decoder = null
             activeDecoder = null
             autoRearmPending = false
+            imageReplacementProtection.clear()
             captureBuffer?.clear()
             if (!state.value.listening) {
                 captureBuffer = null
@@ -444,6 +476,7 @@ class ImageDecoderRepository(
             martinM2Listener(),
             false,
         )
+        imageReplacementProtection.arm(state.value.image?.completedLines ?: 0)
         diagnosticLogger.decoder(
             "AUTO rearmed after complete frame; retained displayed image and PCM buffer",
         )
@@ -615,6 +648,10 @@ class ImageDecoderRepository(
 
     private fun modeDetected(candidate: ActiveSstvDecoder, modeName: String) {
         if (!claimDecoder(candidate)) return
+        if (imageReplacementProtection.active) {
+            imageReplacementProtection.recordMode(modeName)
+            return
+        }
         _state.update { current ->
             current.copy(
                 signal = ImageSignalState.DECODING,
@@ -631,6 +668,14 @@ class ImageDecoderRepository(
         confidence: Int,
     ) {
         if (!claimDecoder(candidate)) return
+        if (imageReplacementProtection.active) {
+            imageReplacementProtection.recordAdaptiveStatus(
+                modeName = modeName,
+                correctionHz = correctionHz,
+                confidence = confidence,
+            )
+            return
+        }
         _state.update { current ->
             current.copy(
                 signal = ImageSignalState.DECODING,
@@ -652,6 +697,14 @@ class ImageDecoderRepository(
         complete: Boolean,
     ) {
         if (!claimDecoder(candidate)) return
+        if (imageReplacementProtection.holdsFrame(completedLines)) return
+        val replacementMetadata = imageReplacementProtection.releaseForFrame(completedLines)
+        if (replacementMetadata != null) {
+            diagnosticLogger.decoder(
+                "DISPLAY protected_image_replaced candidate=$fallbackModeName " +
+                    "completed_lines=$completedLines",
+            )
+        }
         if (complete && state.value.decoder == ImageDecoderSelection.AUTO) {
             autoRearmPending = true
         }
@@ -666,7 +719,21 @@ class ImageDecoderRepository(
         _state.update { current ->
             current.copy(
                 signal = if (complete) ImageSignalState.COMPLETE else ImageSignalState.DECODING,
-                detectedMode = current.detectedMode ?: fallbackModeName,
+                detectedMode = if (replacementMetadata != null) {
+                    replacementMetadata.detectedMode ?: fallbackModeName
+                } else {
+                    current.detectedMode ?: fallbackModeName
+                },
+                frequencyCorrectionHz = if (replacementMetadata != null) {
+                    replacementMetadata.frequencyCorrectionHz
+                } else {
+                    current.frequencyCorrectionHz
+                },
+                decoderConfidence = if (replacementMetadata != null) {
+                    replacementMetadata.decoderConfidence
+                } else {
+                    current.decoderConfidence
+                },
                 image = frame,
                 error = null,
             )
