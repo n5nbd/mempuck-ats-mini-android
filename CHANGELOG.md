@@ -1,3 +1,89 @@
+## 0.36.0-dev.25-r9 — Robot 36 chroma phase correction (2026-08-01)
+
+- Preserve the proven r7/r8 physical-sync, sliding-buffer, line-completion, pair-calibration, themed-preview, and camera-roll paths unchanged.
+- Correct Robot 36 chroma phase to match the mode definition and pinned upstream decoder: the low-separator line carries V (red difference) and the following high-separator line carries U (blue difference).
+- Pass calibrated U and V to `YUV2RGB` in their proper order so red source content decodes red and blue source content decodes blue.
+- Add explicit synthetic regression coverage for both positive V (`R > B`) and positive U (`B > R`).
+- Updated About/build metadata to `0.36.0-dev.25-r9`, version code 64.
+
+## 0.36.0-dev.25-r8 — Robot 36 pair-calibrated chroma (2026-08-01)
+
+- Preserve the r7 physical-sync, callback-alias, monotonic-anchor, completion, themed-preview, and camera-roll paths unchanged.
+- Calibrate each complete Robot 36 U/V pair from its measured low and high separator tones, removing the common chroma DC offset and gain error that produced the strong green cast.
+- Reconstruct both rows directly from retained luminance plus calibrated U and V values instead of repacking temporary color channels.
+- Sample chrominance from a centered, guarded inner window and prime both filter passes from interior averages so porch/end transients do not contaminate the outer color pixels.
+- Extend line probes with chroma calibration mode, pair offset, pair gain, and post-calibration Y/U/V/R/G/B means.
+- Add synthetic regression coverage proving offset/gain-distorted neutral chroma remains neutral and positive V still decodes red rather than blue.
+- Updated About/build metadata to `0.36.0-dev.25-r8`, version code 63.
+
+## 0.36.0-dev.25-r7 — Robot 36 callback-frame sync alias correction (2026-08-01)
+
+- Correct a one-AudioRecord-callback (882-sample) ambiguity in physical sync positions when the demodulator reports a line pulse across a 20 ms callback boundary.
+- Select the nearest expected sync phase from the unshifted, previous-frame, or next-frame representation before rejecting a pulse.
+- Preserve the frame-alias adjustment while applying the remaining small demodulator-bias correction.
+- Keep physical sync authoritative after line 120 instead of falling into timeout-only recovery with every line sampled about 20 ms late.
+- Preserve the r6 color path, themed monochrome preview, and `DCIM/MemPuck` camera-roll save behavior.
+- Add direct regression coverage for positive and negative callback-frame aliases and for unrelated false pulses.
+
+## 0.36.0-dev.25-r6 — Robot 36 physical-sync recovery (2026-08-01)
+
+- Preserve the uncommitted dev.25-r5 source-color reconstruction, U/V correction, themed monochrome preview, and confirmed `DCIM/MemPuck` camera-roll save path.
+- Keep the VIS-confirmed first sync anchor in the rolling sample buffer instead of discarding the first 132 post-sync samples before that line can be decoded.
+- Make accepted physical 9 ms sync pulses authoritative again; timeout prediction is now limited to genuinely missed syncs.
+- Stage candidate sync history and frequency-offset updates in temporary arrays so rejected pulses cannot poison the accepted line clock.
+- Add explicit accepted/rejected sync diagnostics and regression checks requiring normal Robot 36 to decode from physical sync anchors through rolling-buffer rollover.
+- Leave right-edge sampling, final color-balance tuning, and Martin support unchanged in this correction.
+- Updated About/build metadata to `0.36.0-dev.25-r6`, version code 61.
+
+## 0.36.0-dev.25-r5 — Robot 36 absolute stream anchors (2026-08-01)
+
+- Preserve the uncommitted dev.25-r4 source-color reconstruction, U/V phase correction, live monochrome preview, and `DCIM/MemPuck` camera-roll save path.
+- Track Robot 36 sync and decoded-line ownership with absolute 64-bit stream sample positions independent of the seven-second rolling sample buffer.
+- Convert an absolute line anchor to the current rolling-buffer offset only when pixel reconstruction reads that line.
+- Refuse non-monotonic or expired anchors instead of reconstructing repeated rows from a saturated local buffer index.
+- Rebase an expired predicted anchor to the first still-buffered scan-line position without fabricating replacement rows.
+- Add dropped-sync, false-pulse, and rolling-buffer rollover regression coverage proving anchors continue beyond the buffer capacity.
+- Leave right-edge sampling, color balance tuning, and Martin support unchanged in this correction.
+- Updated About/build metadata to `0.36.0-dev.25-r5`, version code 60.
+
+## 0.36.0-dev.25-r4 — Robot 36 monotonic timeout recovery (2026-08-01)
+
+- Preserve the dev.25-r3 U/V phase correction, chroma filtering, source-color frame, and confirmed `DCIM/MemPuck` camera-roll save path.
+- Give every Robot 36 scan-line sample anchor single ownership so the same buffered line can never be reconstructed twice.
+- Reject false 9/20 ms sync candidates before they can mutate accepted timing history.
+- After a missed sync, consume one complete pending scan line and advance the predicted anchor by exactly one nominal 6,615-sample Robot 36 line.
+- Reconcile the next physical sync against that predicted clock instead of inserting repeated horizontal bands.
+- Add anchor/source diagnostics and a dropped-sync plus false-pulse regression test.
+- Leave right-edge sampling and Martin support unchanged in this correction.
+- Updated About/build metadata to `0.36.0-dev.25-r4`, version code 59.
+
+## 0.36.0-dev.25-r3 — Robot 36 U/V phase correction (2026-08-01)
+
+- Keep the committed dev.23 acquisition, sync, complete-line luminance, concealment, and completion paths unchanged.
+- Correct the empirically reversed Robot 36 chroma phase: the low-separator line supplies U and the following high-separator line supplies V, so known red content no longer decodes blue.
+- Filter only the 44 ms chrominance window with edge-primed forward/backward smoothing, preventing separator and reset transients from tinting the frame green.
+- Add pair diagnostics for separator decisions and mean Y/U/V/R/G/B levels at the existing probe lines.
+- Retain confirmed camera-roll saving to `DCIM/MemPuck` and leave Martin support out of this slice.
+- Updated About/build metadata to `0.36.0-dev.25-r3`, version code 58.
+
+## 0.36.0-dev.25-r2 — Robot 36 chroma recovery and camera-roll finalization (2026-08-01)
+
+- Keep the proven dev.23 complete-line luminance path unchanged.
+- Restore the pinned upstream Robot36 forward/backward low-pass path for the 44 ms chrominance channel, fixing the dev.25 green cast and color-phase distortion.
+- Save source-color PNG files to `DCIM/MemPuck` with `DATE_TAKEN`, finalize the MediaStore entry explicitly, and report the actual save error when finalization fails.
+- Keep the live IMG preview theme-aware monochrome and leave SHARE unchanged.
+- Updated About/build metadata to `0.36.0-dev.25-r2`, version code 57.
+
+## 0.36.0-dev.25 — Robot 36 color reconstruction and camera-roll save (2026-08-01)
+
+- Restore Robot 36 Y/U/V pair reconstruction while retaining the proven dev.23 acquisition and complete-line timing path.
+- Keep the live IMG surface theme-aware monochrome; decoded source color remains available behind the preview.
+- Change SAVE to write the full-color PNG to `Pictures/MemPuck` through Android MediaStore.
+- Preserve SHARE as the current theme-aware monochrome rendition.
+- Preserve confidence-gated isolated dropout concealment and interpolate repaired color pixels from adjacent rows.
+- Add a synthetic even/odd Robot 36 color-pair regression test.
+- Updated About/build metadata to `0.36.0-dev.25`, version code 56.
+
 ## 0.36.0-dev.23 — confidence-gated dropout concealment (2026-08-01)
 
 - Leave every Robot 36 line scoring 95 or higher completely untouched.

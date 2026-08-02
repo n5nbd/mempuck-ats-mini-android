@@ -237,7 +237,7 @@ fun ImageDecoderScreen(
                 enabled = completedFrame != null,
                 onClick = {
                     completedFrame?.let { frame ->
-                        saveCompletedImage(context, monochromePreview(frame, palette))
+                        saveCompletedImage(context, colorImage(frame))
                     }
                 },
                 modifier = Modifier.weight(1f),
@@ -380,6 +380,18 @@ private fun monochromePreview(
     )
 }
 
+private fun colorImage(frame: DecodedImageFrame): Bitmap {
+    require(frame.argbPixels.size == frame.width * frame.height) {
+        "Decoded image buffer does not match its dimensions"
+    }
+    return Bitmap.createBitmap(
+        frame.argbPixels.copyOf(),
+        frame.width,
+        frame.height,
+        Bitmap.Config.ARGB_8888,
+    )
+}
+
 private fun interpolateArgb(background: Int, foreground: Int, level: Int): Int {
     val inverse = 255 - level
     val alpha = (((background ushr 24) * inverse + (foreground ushr 24) * level) / 255) and 0xff
@@ -407,7 +419,8 @@ private fun saveCompletedImage(context: android.content.Context, bitmap: Bitmap)
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, imageFileName())
             put(MediaStore.Images.Media.MIME_TYPE, "image/png")
-            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_PICTURES + "/MemPuck")
+            put(MediaStore.Images.Media.RELATIVE_PATH, Environment.DIRECTORY_DCIM + "/MemPuck")
+            put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
             put(MediaStore.Images.Media.IS_PENDING, 1)
         }
         val resolver = context.contentResolver
@@ -419,15 +432,22 @@ private fun saveCompletedImage(context: android.content.Context, bitmap: Bitmap)
             } ?: error("Could not open image output")
             values.clear()
             values.put(MediaStore.Images.Media.IS_PENDING, 0)
-            resolver.update(uri, values, null, null)
+            check(resolver.update(uri, values, null, null) == 1) {
+                "MediaStore did not finalize the image entry"
+            }
+            resolver.notifyChange(uri, null)
         } catch (failure: Throwable) {
             resolver.delete(uri, null, null)
             throw failure
         }
     }.onSuccess {
-        Toast.makeText(context, "SAVED TO PICTURES/MEMPUCK", Toast.LENGTH_SHORT).show()
+        Toast.makeText(context, "SAVED TO CAMERA ROLL • DCIM/MEMPUCK", Toast.LENGTH_SHORT).show()
     }.onFailure {
-        Toast.makeText(context, "IMAGE SAVE FAILED", Toast.LENGTH_SHORT).show()
+        Toast.makeText(
+            context,
+            "IMAGE SAVE FAILED: ${it.message ?: it::class.java.simpleName}",
+            Toast.LENGTH_LONG,
+        ).show()
     }
 }
 

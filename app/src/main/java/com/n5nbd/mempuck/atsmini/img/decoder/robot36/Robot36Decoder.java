@@ -61,7 +61,7 @@ public final class Robot36Decoder {
     private final int[] lineConfidence;
     private final float[] scanLineBuffer;
     private final float[] scratchBuffer;
-    private final int[] lastSyncPulses;
+    private final long[] lastSyncPulses;
     private final int[] lastScanLines;
     private final float[] lastFrequencyOffsets;
     private final float[] visCodeBitFrequencies;
@@ -82,20 +82,24 @@ public final class Robot36Decoder {
     private int inputBufferFill;
     private int currentSample;
     private int leaderBreakIndex;
-    private int lastSyncPulseIndex;
+    private long scanLineBufferStartSample;
+    private long lastSyncPulseSample;
     private int currentScanLineSamples;
     private float lastFrequencyOffset;
     private int imageLine = -1;
-    private boolean timeoutLineDecoded;
+    private long lastDecodedSyncSample = Long.MIN_VALUE;
     private long totalInputSamples;
     private long nextDiagnosticSample;
     private int pulse5msCount;
     private int pulse9msCount;
     private int pulse20msCount;
-    private int provisionalSyncIndex = -1;
+    private long provisionalSyncSample = -1;
     private int adaptiveConfidence;
     private float smoothedFrequencyOffset;
     private boolean provisionalDecode;
+    private boolean physicalSyncCalibrated;
+    private long physicalSyncBiasSamples;
+    private int physicalSyncWarmupPulses;
 
     public Robot36Decoder(int sampleRate, Listener listener) {
         this(sampleRate, listener, false);
@@ -112,10 +116,10 @@ public final class Robot36Decoder {
         inputBuffer = new float[processFrameSamples];
         nextDiagnosticSample = sampleRate;
         mode = new Robot36Mode(sampleRate);
-        lineBuffer = new PixelBuffer(mode.getWidth(), 1);
+        lineBuffer = new PixelBuffer(mode.getWidth(), 2);
         imagePixels = new int[mode.getWidth() * mode.getHeight()];
         rawGrayscalePixels = new byte[mode.getWidth() * mode.getHeight()];
-        rawLuminanceRow = new byte[mode.getWidth()];
+        rawLuminanceRow = new byte[mode.getWidth() * 2];
         lineConfidence = new int[mode.getHeight()];
         Arrays.fill(imagePixels, 0xff000000);
         demodulator = new Demodulator(sampleRate);
@@ -141,7 +145,7 @@ public final class Robot36Decoder {
 
         int scanLineCount = 4;
         lastScanLines = new int[scanLineCount];
-        lastSyncPulses = new int[scanLineCount + 1];
+        lastSyncPulses = new long[scanLineCount + 1];
         lastFrequencyOffsets = new float[scanLineCount + 1];
         scanLineMinSamples = (int) Math.round(0.05 * sampleRate);
         syncPulseToleranceSamples = (int) Math.round(0.03 * sampleRate);
@@ -184,15 +188,17 @@ public final class Robot36Decoder {
             return;
         }
 
-        int availableSamples = currentSample - lastSyncPulseIndex;
+        long currentStreamSample = currentStreamSample();
+        long availableSamples = currentStreamSample - lastSyncPulseSample;
         int requiredSamples = mode.getRequiredSamplesAfterSync();
         listener.onDiagnostic(
             "ROBOT36 finish_requested reason=" + reason
                 + " image_line=" + imageLine
                 + " available_samples=" + availableSamples
                 + " required_samples=" + requiredSamples
-                + " current_sample=" + currentSample
-                + " last_sync_sample=" + lastSyncPulseIndex
+                + " current_sample=" + currentStreamSample
+                + " last_sync_sample=" + lastSyncPulseSample
+                + " buffer_start_sample=" + scanLineBufferStartSample
                 + " state=" + (provisionalDecode ? "PROVISIONAL" : "CONFIRMED")
         );
 
@@ -200,7 +206,7 @@ public final class Robot36Decoder {
         // Decode exactly one pending final row only when its complete payload is
         // already buffered and the user/audio lifecycle explicitly ends capture.
         if (availableSamples >= requiredSamples && imageLine < mode.getHeight()) {
-            decodeLine(lastSyncPulseIndex, lastFrequencyOffset);
+            decodeLine(lastSyncPulseSample, lastFrequencyOffset, "finish");
         }
 
         int missingRows = mode.getHeight() - imageLine;
@@ -219,17 +225,17 @@ public final class Robot36Decoder {
 
     private void processFloats(float[] recordBuffer, int count) {
         boolean syncPulseDetected = demodulator.process(recordBuffer, count);
-        int syncPulseIndex = currentSample + demodulator.syncPulseOffset;
+        long syncPulseSample = currentStreamSample() + demodulator.syncPulseOffset;
         for (int i = 0; i < count; ++i) {
             scanLineBuffer[currentSample++] = recordBuffer[i];
             if (currentSample >= scanLineBuffer.length) {
                 shiftSamples(currentScanLineSamples);
-                syncPulseIndex -= currentScanLineSamples;
             }
         }
         totalInputSamples += count;
 
-        if (syncPulseDetected) {
+        int syncPulseIndex = absoluteToLocal(syncPulseSample);
+        if (syncPulseDetected && syncPulseIndex >= 0 && syncPulseIndex < currentSample) {
             switch (demodulator.syncPulseWidth) {
                 case FiveMilliSeconds:
                     ++pulse5msCount;
@@ -237,14 +243,14 @@ public final class Robot36Decoder {
                 case NineMilliSeconds:
                     ++pulse9msCount;
                     leaderBreakIndex = syncPulseIndex;
-                    considerProvisionalStart(syncPulseIndex, demodulator.frequencyOffset);
-                    processSyncPulse(syncPulseIndex);
+                    considerProvisionalStart(syncPulseSample, demodulator.frequencyOffset);
+                    processSyncPulse(syncPulseSample);
                     break;
                 case TwentyMilliSeconds:
                     ++pulse20msCount;
                     // Robot36 treats both 9 ms and 20 ms pulses as possible VIS leader breaks.
                     leaderBreakIndex = syncPulseIndex;
-                    processSyncPulse(syncPulseIndex);
+                    processSyncPulse(syncPulseSample);
                     break;
                 default:
                     break;
@@ -254,22 +260,26 @@ public final class Robot36Decoder {
         } else if (
             imageLine >= 0
                 && imageLine < mode.getHeight()
-                && !timeoutLineDecoded
-                && currentSample > lastSyncPulseIndex + (currentScanLineSamples * 5) / 4
+                && currentStreamSample()
+                    > lastSyncPulseSample + (long) (currentScanLineSamples * 5) / 4
         ) {
             // A missed following sync must not stall progressive output forever.
             // Decode at most one fully buffered pending line, but do not infer EOF
             // and never fill the rest of the frame from this callback path.
-            int availableSamples = currentSample - lastSyncPulseIndex;
+            long availableSamples = currentStreamSample() - lastSyncPulseSample;
             int requiredSamples = mode.getRequiredSamplesAfterSync();
             if (availableSamples >= requiredSamples) {
+                long pendingSyncSample = lastSyncPulseSample;
                 listener.onDiagnostic(
                     "ROBOT36 timeout_line_ready line=" + (imageLine + 1)
                         + " available_samples=" + availableSamples
                         + " required_samples=" + requiredSamples
+                        + " anchor_sample=" + pendingSyncSample
+                        + " buffer_start_sample=" + scanLineBufferStartSample
                 );
-                decodeLine(lastSyncPulseIndex, lastFrequencyOffset);
-                timeoutLineDecoded = true;
+                if (decodeLine(pendingSyncSample, lastFrequencyOffset, "timeout")) {
+                    advancePredictedAnchor(pendingSyncSample);
+                }
             }
         }
         emitPulseSummaryIfDue();
@@ -405,8 +415,12 @@ public final class Robot36Decoder {
         }
         syncPulseIndex -= pulseFilterDelay;
 
-        initializeDecode(syncPulseIndex, leaderFrequencyOffset, false);
-        shiftSamples(lastSyncPulseIndex + mode.getFirstPixelSampleIndex());
+        long syncPulseSample = localToAbsolute(syncPulseIndex);
+        initializeDecode(syncPulseSample, leaderFrequencyOffset, false);
+        // Keep the accepted sync anchor in the rolling buffer. Absolute-anchor
+        // decoding needs the sync sample itself to remain addressable until the
+        // following physical sync confirms that the complete line is present.
+        shiftSamples(syncPulseIndex);
         listener.onDiagnostic(
             "VIS accepted code=" + Robot36Mode.VIS_CODE
                 + " leader_offset_hz=" + Math.round(leaderFrequencyOffset * 400)
@@ -414,14 +428,14 @@ public final class Robot36Decoder {
         listener.onDiagnostic(
             "ROBOT36 geometry line_samples=" + mode.getScanLineSamples()
                 + " first_pixel_after_sync_end_sample=" + mode.getFirstPixelSampleIndex()
-                + " output=complete_line_accumulator"
+                + " output=complete_color_pair_accumulator"
         );
         listener.onTimeline(
             "mode=ROBOT 36\n"
                 + "sample_rate_hz=" + sampleRate + "\n"
                 + "scan_line_samples=" + mode.getScanLineSamples() + "\n"
-                + "sync_end_sample=" + syncPulseIndex + "\n"
-                + "luminance_begin_sample=" + (syncPulseIndex + mode.getFirstPixelSampleIndex()) + "\n"
+                + "sync_end_sample=" + syncPulseSample + "\n"
+                + "luminance_begin_sample=" + (syncPulseSample + mode.getFirstPixelSampleIndex()) + "\n"
                 + "luminance_duration_samples=" + Math.round(0.088 * sampleRate) + "\n"
                 + "pixel_count=" + mode.getWidth() + "\n"
         );
@@ -436,20 +450,20 @@ public final class Robot36Decoder {
         return true;
     }
 
-    private void considerProvisionalStart(int syncPulseIndex, float frequencyOffset) {
+    private void considerProvisionalStart(long syncPulseSample, float frequencyOffset) {
         if (!allowProvisionalStart || imageLine >= 0) {
             return;
         }
-        if (provisionalSyncIndex < 0) {
-            provisionalSyncIndex = syncPulseIndex;
+        if (provisionalSyncSample < 0) {
+            provisionalSyncSample = syncPulseSample;
             smoothedFrequencyOffset = frequencyOffset;
             return;
         }
-        int interval = syncPulseIndex - provisionalSyncIndex;
+        long interval = syncPulseSample - provisionalSyncSample;
         int tolerance = (int) Math.round(0.020 * sampleRate);
         if (Math.abs(interval - mode.getScanLineSamples()) <= tolerance) {
             smoothedFrequencyOffset = 0.7f * smoothedFrequencyOffset + 0.3f * frequencyOffset;
-            initializeDecode(provisionalSyncIndex, smoothedFrequencyOffset, true);
+            initializeDecode(provisionalSyncSample, smoothedFrequencyOffset, true);
             adaptiveConfidence = 20;
             int correctionHz = Math.round(-smoothedFrequencyOffset * 400);
             listener.onDiagnostic(
@@ -462,71 +476,227 @@ public final class Robot36Decoder {
             listener.onAdaptiveStatus("ROBOT 36 RAW", correctionHz, adaptiveConfidence);
             emitFrame(false);
         }
-        provisionalSyncIndex = syncPulseIndex;
+        provisionalSyncSample = syncPulseSample;
     }
 
-    private void initializeDecode(int syncPulseIndex, float frequencyOffset, boolean provisional) {
+    private void initializeDecode(
+        long syncPulseSample,
+        float frequencyOffset,
+        boolean provisional
+    ) {
         mode.resetState();
         Arrays.fill(imagePixels, 0xff000000);
         Arrays.fill(rawGrayscalePixels, (byte) 0);
         Arrays.fill(lineConfidence, 0);
         imageLine = 0;
-        timeoutLineDecoded = false;
+        lastDecodedSyncSample = Long.MIN_VALUE;
         provisionalDecode = provisional;
-        lastSyncPulseIndex = syncPulseIndex;
+        physicalSyncCalibrated = false;
+        physicalSyncBiasSamples = 0;
+        physicalSyncWarmupPulses = 0;
+        lastSyncPulseSample = syncPulseSample;
         currentScanLineSamples = mode.getScanLineSamples();
         lastFrequencyOffset = frequencyOffset;
         smoothedFrequencyOffset = frequencyOffset;
-        int oldestSyncPulseIndex = lastSyncPulseIndex
-            - (lastSyncPulses.length - 1) * currentScanLineSamples;
+        long oldestSyncPulseSample = lastSyncPulseSample
+            - (long) (lastSyncPulses.length - 1) * currentScanLineSamples;
         for (int i = 0; i < lastSyncPulses.length; ++i) {
-            lastSyncPulses[i] = oldestSyncPulseIndex + i * currentScanLineSamples;
+            lastSyncPulses[i] = oldestSyncPulseSample + (long) i * currentScanLineSamples;
         }
         Arrays.fill(lastScanLines, currentScanLineSamples);
         Arrays.fill(lastFrequencyOffsets, frequencyOffset);
     }
 
-    private void processSyncPulse(int latestSyncIndex) {
-        boolean previousLineDecodedByTimeout = timeoutLineDecoded;
-        timeoutLineDecoded = false;
-        // A newly detected sync marks the beginning of the next line. Decode the
-        // previously pending line only now, after its complete 150 ms payload is
-        // guaranteed to be present in scanLineBuffer. The earlier implementation
-        // decoded latestSyncIndex immediately, while only the first AudioRecord
-        // callback after that sync was available; that updated roughly 57 pixels
-        // and left the rest of the row stale.
-        int previousSyncIndex = lastSyncPulses[lastSyncPulses.length - 1];
-        float previousFrequencyOffset = lastFrequencyOffsets[lastFrequencyOffsets.length - 1];
-
-        for (int i = 1; i < lastSyncPulses.length; ++i) {
-            lastSyncPulses[i - 1] = lastSyncPulses[i];
-        }
-        lastSyncPulses[lastSyncPulses.length - 1] = latestSyncIndex;
-        for (int i = 1; i < lastScanLines.length; ++i) {
-            lastScanLines[i - 1] = lastScanLines[i];
-        }
-        lastScanLines[lastScanLines.length - 1] = lastSyncPulses[lastSyncPulses.length - 1]
-            - lastSyncPulses[lastSyncPulses.length - 2];
-        for (int i = 1; i < lastFrequencyOffsets.length; ++i) {
-            lastFrequencyOffsets[i - 1] = lastFrequencyOffsets[i];
-        }
-        lastFrequencyOffsets[lastFrequencyOffsets.length - 1] = demodulator.frequencyOffset;
-
-        if (imageLine < 0 || imageLine >= mode.getHeight() || lastScanLines[0] == 0) {
+    private void processSyncPulse(long rawLatestSyncSample) {
+        if (imageLine < 0 || imageLine >= mode.getHeight()) {
             return;
         }
-        double mean = scanLineMean(lastScanLines);
+
+        long previousSyncSample = lastSyncPulseSample;
+        long expectedSyncSample = previousSyncSample + currentScanLineSamples;
+        int candidateToleranceSamples = Math.max(6 * scanLineToleranceSamples, 6);
+
+        // The VIS parser and streaming demodulator have different fixed filter
+        // delays. Calibrate that one-time bias from the first plausible physical
+        // line sync, then keep every later anchor in the VIS sync-end convention.
+        if (!physicalSyncCalibrated) {
+            long rawPhaseErrorSamples = rawLatestSyncSample - expectedSyncSample;
+            if (Math.abs(rawPhaseErrorSamples) > candidateToleranceSamples) {
+                listener.onDiagnostic(
+                    "ROBOT36 sync_candidate_rejected reason=uncalibrated_phase"
+                        + " raw_latest_sample=" + rawLatestSyncSample
+                        + " expected_sample=" + expectedSyncSample
+                        + " phase_error_samples=" + rawPhaseErrorSamples
+                        + " tolerance_samples=" + candidateToleranceSamples
+                );
+                return;
+            }
+            if (physicalSyncWarmupPulses == 0) {
+                // The first streaming sync after VIS still carries demodulator
+                // filter-startup delay. Let timeout ownership finish the first
+                // buffered line, then calibrate from the next stable pulse.
+                physicalSyncWarmupPulses = 1;
+                listener.onDiagnostic(
+                    "ROBOT36 sync_warmup_ignored"
+                        + " raw_latest_sample=" + rawLatestSyncSample
+                        + " expected_sample=" + expectedSyncSample
+                        + " phase_error_samples=" + rawPhaseErrorSamples
+                );
+                return;
+            }
+            physicalSyncBiasSamples = -rawPhaseErrorSamples;
+            physicalSyncCalibrated = true;
+            listener.onDiagnostic(
+                "ROBOT36 sync_clock_calibrated"
+                    + " raw_latest_sample=" + rawLatestSyncSample
+                    + " aligned_latest_sample="
+                    + (rawLatestSyncSample + physicalSyncBiasSamples)
+                    + " bias_samples=" + physicalSyncBiasSamples
+            );
+        }
+
+        long unaliasedLatestSyncSample = rawLatestSyncSample + physicalSyncBiasSamples;
+        long latestSyncSample = correctFrameAliasedSyncSample(
+            unaliasedLatestSyncSample,
+            expectedSyncSample,
+            processFrameSamples,
+            candidateToleranceSamples
+        );
+        long frameAliasSamples = latestSyncSample - unaliasedLatestSyncSample;
+        if (frameAliasSamples != 0) {
+            listener.onDiagnostic(
+                "ROBOT36 sync_frame_alias_corrected"
+                    + " raw_latest_sample=" + rawLatestSyncSample
+                    + " unaliased_latest_sample=" + unaliasedLatestSyncSample
+                    + " corrected_latest_sample=" + latestSyncSample
+                    + " expected_sample=" + expectedSyncSample
+                    + " alias_samples=" + frameAliasSamples
+            );
+        }
+        long phaseErrorSamples = latestSyncSample - expectedSyncSample;
+
+        // Reject false 9/20 ms pulses before touching accepted timing history.
+        if (Math.abs(phaseErrorSamples) > candidateToleranceSamples) {
+            listener.onDiagnostic(
+                "ROBOT36 sync_candidate_rejected reason=phase"
+                    + " raw_latest_sample=" + rawLatestSyncSample
+                    + " latest_sample=" + latestSyncSample
+                    + " expected_sample=" + expectedSyncSample
+                    + " phase_error_samples=" + phaseErrorSamples
+                    + " tolerance_samples=" + candidateToleranceSamples
+            );
+            return;
+        }
+
+        // Demodulator group delay can move by a few milliseconds after a missed
+        // or false pulse. Re-align that detector delay to the accepted line clock
+        // instead of letting the sampling window walk sideways across the image.
+        if (phaseErrorSamples != 0) {
+            physicalSyncBiasSamples -= phaseErrorSamples;
+            latestSyncSample = rawLatestSyncSample
+                + physicalSyncBiasSamples
+                + frameAliasSamples;
+            listener.onDiagnostic(
+                "ROBOT36 sync_phase_realigned"
+                    + " raw_latest_sample=" + rawLatestSyncSample
+                    + " phase_error_samples=" + phaseErrorSamples
+                    + " new_bias_samples=" + physicalSyncBiasSamples
+                    + " aligned_latest_sample=" + latestSyncSample
+            );
+            phaseErrorSamples = latestSyncSample - expectedSyncSample;
+        }
+
+        long candidateLineSamplesLong = latestSyncSample - previousSyncSample;
+        if (candidateLineSamplesLong < Integer.MIN_VALUE
+            || candidateLineSamplesLong > Integer.MAX_VALUE) {
+            listener.onDiagnostic(
+                "ROBOT36 sync_candidate_rejected reason=interval_range"
+                    + " latest_sample=" + latestSyncSample
+                    + " previous_sample=" + previousSyncSample
+                    + " interval_samples=" + candidateLineSamplesLong
+            );
+            return;
+        }
+        int candidateLineSamples = (int) candidateLineSamplesLong;
+
+        // Stage timing history in temporary arrays. A candidate that fails any
+        // validation must leave the accepted clock completely untouched.
+        long[] candidateSyncPulses = lastSyncPulses.clone();
+        int[] candidateScanLines = lastScanLines.clone();
+        float[] candidateFrequencyOffsets = lastFrequencyOffsets.clone();
+        for (int i = 1; i < candidateSyncPulses.length; ++i) {
+            candidateSyncPulses[i - 1] = candidateSyncPulses[i];
+        }
+        candidateSyncPulses[candidateSyncPulses.length - 1] = latestSyncSample;
+        for (int i = 1; i < candidateScanLines.length; ++i) {
+            candidateScanLines[i - 1] = candidateScanLines[i];
+        }
+        candidateScanLines[candidateScanLines.length - 1] = candidateLineSamples;
+        for (int i = 1; i < candidateFrequencyOffsets.length; ++i) {
+            candidateFrequencyOffsets[i - 1] = candidateFrequencyOffsets[i];
+        }
+        candidateFrequencyOffsets[candidateFrequencyOffsets.length - 1] =
+            demodulator.frequencyOffset;
+
+        double mean = scanLineMean(candidateScanLines);
         int scanLineSamples = (int) Math.round(mean);
         if (scanLineSamples < scanLineMinSamples || scanLineSamples > scratchBuffer.length) {
+            listener.onDiagnostic(
+                "ROBOT36 sync_candidate_rejected reason=mean_range"
+                    + " latest_sample=" + latestSyncSample
+                    + " interval_samples=" + candidateLineSamples
+                    + " mean_samples=" + scanLineSamples
+            );
             return;
         }
-        if (scanLineStdDev(lastScanLines, mean) > scanLineToleranceSamples) {
+        double stdDev = scanLineStdDev(candidateScanLines, mean);
+        if (stdDev > scanLineToleranceSamples) {
+            listener.onDiagnostic(
+                "ROBOT36 sync_candidate_rejected reason=jitter"
+                    + " latest_sample=" + latestSyncSample
+                    + " interval_samples=" + candidateLineSamples
+                    + " mean_samples=" + scanLineSamples
+                    + " stddev_samples=" + Math.round(stdDev)
+                    + " tolerance_samples=" + scanLineToleranceSamples
+            );
             return;
         }
         if (Math.abs(scanLineSamples - mode.getScanLineSamples()) > scanLineToleranceSamples) {
+            listener.onDiagnostic(
+                "ROBOT36 sync_candidate_rejected reason=mode_interval"
+                    + " latest_sample=" + latestSyncSample
+                    + " interval_samples=" + candidateLineSamples
+                    + " mean_samples=" + scanLineSamples
+                    + " nominal_samples=" + mode.getScanLineSamples()
+                    + " tolerance_samples=" + scanLineToleranceSamples
+            );
             return;
         }
-        float frequencyOffset = (float) frequencyOffsetMean(lastFrequencyOffsets);
+
+        System.arraycopy(
+            candidateSyncPulses,
+            0,
+            lastSyncPulses,
+            0,
+            lastSyncPulses.length
+        );
+        System.arraycopy(
+            candidateScanLines,
+            0,
+            lastScanLines,
+            0,
+            lastScanLines.length
+        );
+        System.arraycopy(
+            candidateFrequencyOffsets,
+            0,
+            lastFrequencyOffsets,
+            0,
+            lastFrequencyOffsets.length
+        );
+
+        float previousFrequencyOffset = lastFrequencyOffset;
+        float frequencyOffset = (float) frequencyOffsetMean(candidateFrequencyOffsets);
         smoothedFrequencyOffset = smoothedFrequencyOffset == 0
             ? frequencyOffset
             : 0.8f * smoothedFrequencyOffset + 0.2f * frequencyOffset;
@@ -536,44 +706,111 @@ public final class Robot36Decoder {
             Math.round(-smoothedFrequencyOffset * 400),
             adaptiveConfidence
         );
+        listener.onDiagnostic(
+            "ROBOT36 sync_candidate_accepted"
+                + " previous_sample=" + previousSyncSample
+                + " latest_sample=" + latestSyncSample
+                + " interval_samples=" + candidateLineSamples
+                + " phase_error_samples=" + phaseErrorSamples
+                + " mean_samples=" + scanLineSamples
+        );
 
-        int requiredSample = previousSyncIndex + mode.getRequiredSamplesAfterSync();
-        int availableSamples = currentSample - previousSyncIndex;
-        if (previousLineDecodedByTimeout) {
+        long requiredSample = previousSyncSample + mode.getRequiredSamplesAfterSync();
+        long availableSamples = currentStreamSample() - previousSyncSample;
+        if (lastDecodedSyncSample == previousSyncSample) {
             listener.onDiagnostic(
-                "ROBOT36 line_already_decoded source=timeout"
-                    + " previous_sync_sample=" + previousSyncIndex
-                    + " next_sync_sample=" + latestSyncIndex
+                "ROBOT36 line_already_decoded"
+                    + " previous_sync_sample=" + previousSyncSample
+                    + " next_sync_sample=" + latestSyncSample
             );
-        } else if (previousSyncIndex >= 0 && currentSample >= requiredSample) {
+        } else if (currentStreamSample() >= requiredSample) {
             listener.onDiagnostic(
                 "ROBOT36 line_ready line=" + (imageLine + 1)
                     + " available_samples=" + availableSamples
                     + " required_samples=" + mode.getRequiredSamplesAfterSync()
+                    + " anchor_sample=" + previousSyncSample
+                    + " buffer_start_sample=" + scanLineBufferStartSample
             );
-            decodeLine(previousSyncIndex, previousFrequencyOffset);
+            decodeLine(previousSyncSample, previousFrequencyOffset, "sync");
         } else {
             listener.onDiagnostic(
                 "ROBOT36 line_deferred line=" + (imageLine + 1)
                     + " available_samples=" + availableSamples
                     + " required_samples=" + mode.getRequiredSamplesAfterSync()
+                    + " anchor_sample=" + previousSyncSample
+                    + " buffer_start_sample=" + scanLineBufferStartSample
             );
         }
-        lastSyncPulseIndex = latestSyncIndex;
+
+        lastSyncPulseSample = latestSyncSample;
         currentScanLineSamples = scanLineSamples;
         lastFrequencyOffset = smoothedFrequencyOffset;
     }
 
-    private void decodeLine(int syncPulseIndex, float frequencyOffset) {
-        int availableSamples = currentSample - syncPulseIndex;
+    private void advancePredictedAnchor(long decodedAnchorSample) {
+        if (lastSyncPulseSample != decodedAnchorSample) {
+            return;
+        }
+        int predictedLineSamples = mode.getScanLineSamples();
+        long predictedSyncSample = decodedAnchorSample + predictedLineSamples;
+        lastSyncPulseSample = predictedSyncSample;
+
+        for (int i = 1; i < lastSyncPulses.length; ++i) {
+            lastSyncPulses[i - 1] = lastSyncPulses[i];
+        }
+        lastSyncPulses[lastSyncPulses.length - 1] = predictedSyncSample;
+        for (int i = 1; i < lastScanLines.length; ++i) {
+            lastScanLines[i - 1] = lastScanLines[i];
+        }
+        lastScanLines[lastScanLines.length - 1] = predictedLineSamples;
+        for (int i = 1; i < lastFrequencyOffsets.length; ++i) {
+            lastFrequencyOffsets[i - 1] = lastFrequencyOffsets[i];
+        }
+        lastFrequencyOffsets[lastFrequencyOffsets.length - 1] = lastFrequencyOffset;
+
+        listener.onDiagnostic(
+            "ROBOT36 predicted_anchor_advanced"
+                + " decoded_anchor_sample=" + decodedAnchorSample
+                + " next_anchor_sample=" + predictedSyncSample
+                + " line_samples=" + predictedLineSamples
+        );
+    }
+
+    private boolean decodeLine(long syncPulseSample, float frequencyOffset, String source) {
+        long availableSamples = currentStreamSample() - syncPulseSample;
         int requiredSamples = mode.getRequiredSamplesAfterSync();
-        if (syncPulseIndex < 0 || availableSamples < requiredSamples) {
+        int syncPulseIndex = absoluteToLocal(syncPulseSample);
+        if (syncPulseIndex < 0) {
+            listener.onDiagnostic(
+                "ROBOT36 anchor_expired"
+                    + " source=" + source
+                    + " anchor_sample=" + syncPulseSample
+                    + " buffer_start_sample=" + scanLineBufferStartSample
+                    + " image_line=" + imageLine
+            );
+            rebaseExpiredAnchor(syncPulseSample);
+            return false;
+        }
+        if (availableSamples < requiredSamples
+            || syncPulseIndex + requiredSamples > currentSample) {
             listener.onDiagnostic(
                 "ROBOT36 decode_deferred line=" + (imageLine + 1)
                     + " available_samples=" + availableSamples
                     + " required_samples=" + requiredSamples
+                    + " anchor_sample=" + syncPulseSample
+                    + " buffer_offset=" + syncPulseIndex
             );
-            return;
+            return false;
+        }
+        if (syncPulseSample <= lastDecodedSyncSample) {
+            listener.onDiagnostic(
+                "ROBOT36 nonmonotonic_anchor_ignored"
+                    + " source=" + source
+                    + " anchor_sample=" + syncPulseSample
+                    + " previous_anchor_sample=" + lastDecodedSyncSample
+                    + " image_line=" + imageLine
+            );
+            return false;
         }
         boolean decodedPair = mode.decodeScanLine(
             lineBuffer,
@@ -583,8 +820,17 @@ public final class Robot36Decoder {
             syncPulseIndex,
             frequencyOffset
         );
+        lastDecodedSyncSample = syncPulseSample;
+        listener.onDiagnostic(
+            "ROBOT36 line_anchor_consumed"
+                + " source=" + source
+                + " anchor_sample=" + syncPulseSample
+                + " buffer_offset=" + syncPulseIndex
+                + " output_line=" + (imageLine + 1)
+                + " pair_complete=" + decodedPair
+        );
         if (!decodedPair || imageLine < 0 || imageLine >= mode.getHeight()) {
-            return;
+            return true;
         }
         int rows = Math.min(lineBuffer.height, mode.getHeight() - imageLine);
         for (int row = 0; row < rows; ++row) {
@@ -598,12 +844,15 @@ public final class Robot36Decoder {
             );
             System.arraycopy(
                 rawLuminanceRow,
-                0,
+                row * mode.getWidth(),
                 rawGrayscalePixels,
                 targetLine * mode.getWidth(),
                 mode.getWidth()
             );
-            lineConfidence[targetLine] = calculateLineConfidence(rawLuminanceRow);
+            lineConfidence[targetLine] = calculateLineConfidence(
+                rawLuminanceRow,
+                row * mode.getWidth()
+            );
             listener.onDiagnostic(
                 "ROBOT36 line_confidence line=" + (targetLine + 1)
                     + " score=" + lineConfidence[targetLine]
@@ -615,9 +864,9 @@ public final class Robot36Decoder {
             || imageLine == 180 || imageLine == mode.getHeight()) {
             listener.onDiagnostic(
                 "ROBOT36 line_probe line=" + imageLine
-                    + " sync_end_sample=" + syncPulseIndex
+                    + " sync_end_sample=" + syncPulseSample
                     + " luminance_begin_sample="
-                    + (syncPulseIndex + mode.getFirstPixelSampleIndex())
+                    + (syncPulseSample + mode.getFirstPixelSampleIndex())
                     + " " + mode.getLastLuminanceProbe()
             );
         }
@@ -640,16 +889,17 @@ public final class Robot36Decoder {
                 true
             );
         }
+        return true;
     }
 
 
-    private int calculateLineConfidence(byte[] row) {
+    private int calculateLineConfidence(byte[] rows, int rowOffset) {
         int width = mode.getWidth();
         int clipped = 0;
         int sharpSteps = 0;
-        int previous = row[0] & 0xff;
+        int previous = rows[rowOffset] & 0xff;
         for (int x = 0; x < width; ++x) {
-            int value = row[x] & 0xff;
+            int value = rows[rowOffset + x] & 0xff;
             if (value <= 2 || value >= 253) {
                 ++clipped;
             }
@@ -710,7 +960,10 @@ public final class Robot36Decoder {
                 int below = rawGrayscalePixels[belowOffset + pixel] & 0xff;
                 int repaired = (above + below + 1) / 2;
                 rawGrayscalePixels[candidateOffset + pixel] = (byte) repaired;
-                imagePixels[candidateOffset + pixel] = ColorConverter.GRAY_LINEAR(repaired / 255f);
+                imagePixels[candidateOffset + pixel] = averageArgb(
+                    imagePixels[aboveOffset + pixel],
+                    imagePixels[belowOffset + pixel]
+                );
             }
             repairedPixels += length;
             ++repairedRuns;
@@ -729,6 +982,15 @@ public final class Robot36Decoder {
                     + " confidence=" + lineConfidence[candidateLine]
             );
         }
+    }
+
+
+    private int averageArgb(int first, int second) {
+        int alpha = (((first >>> 24) & 0xff) + ((second >>> 24) & 0xff) + 1) / 2;
+        int red = (((first >>> 16) & 0xff) + ((second >>> 16) & 0xff) + 1) / 2;
+        int green = (((first >>> 8) & 0xff) + ((second >>> 8) & 0xff) + 1) / 2;
+        int blue = ((first & 0xff) + (second & 0xff) + 1) / 2;
+        return alpha << 24 | red << 16 | green << 8 | blue;
     }
 
     private boolean isIsolatedPixelOutlier(
@@ -831,16 +1093,79 @@ public final class Robot36Decoder {
         return mean / offsets.length;
     }
 
+
+    static long correctFrameAliasedSyncSample(
+        long latestSyncSample,
+        long expectedSyncSample,
+        int frameSamples,
+        int toleranceSamples
+    ) {
+        if (frameSamples <= 0 || toleranceSamples < 0) {
+            return latestSyncSample;
+        }
+        long bestSample = latestSyncSample;
+        long bestError = Math.abs(latestSyncSample - expectedSyncSample);
+        for (int frameOffset = -1; frameOffset <= 1; ++frameOffset) {
+            long candidate = latestSyncSample + (long) frameOffset * frameSamples;
+            long candidateError = Math.abs(candidate - expectedSyncSample);
+            if (candidateError < bestError) {
+                bestSample = candidate;
+                bestError = candidateError;
+            }
+        }
+        return bestError <= toleranceSamples ? bestSample : latestSyncSample;
+    }
+
+    private long currentStreamSample() {
+        return scanLineBufferStartSample + currentSample;
+    }
+
+    private long localToAbsolute(int localSample) {
+        return scanLineBufferStartSample + localSample;
+    }
+
+    private int absoluteToLocal(long absoluteSample) {
+        long localSample = absoluteSample - scanLineBufferStartSample;
+        if (localSample < 0 || localSample > Integer.MAX_VALUE) {
+            return -1;
+        }
+        return (int) localSample;
+    }
+
+    private void rebaseExpiredAnchor(long expiredAnchorSample) {
+        if (lastSyncPulseSample != expiredAnchorSample) {
+            return;
+        }
+        long lineSamples = mode.getScanLineSamples();
+        long behindSamples = scanLineBufferStartSample - expiredAnchorSample;
+        long skippedLines = Math.max(1, (behindSamples + lineSamples - 1) / lineSamples);
+        long rebasedAnchorSample = expiredAnchorSample + skippedLines * lineSamples;
+        lastSyncPulseSample = rebasedAnchorSample;
+
+        long oldestSyncPulseSample = rebasedAnchorSample
+            - (long) (lastSyncPulses.length - 1) * currentScanLineSamples;
+        for (int i = 0; i < lastSyncPulses.length; ++i) {
+            lastSyncPulses[i] = oldestSyncPulseSample + (long) i * currentScanLineSamples;
+        }
+        Arrays.fill(lastScanLines, currentScanLineSamples);
+        Arrays.fill(lastFrequencyOffsets, lastFrequencyOffset);
+
+        listener.onDiagnostic(
+            "ROBOT36 anchor_rebased"
+                + " expired_anchor_sample=" + expiredAnchorSample
+                + " rebased_anchor_sample=" + rebasedAnchorSample
+                + " skipped_scan_lines=" + skippedLines
+                + " buffer_start_sample=" + scanLineBufferStartSample
+        );
+    }
+
     private void shiftSamples(int shift) {
         if (shift <= 0 || shift > currentSample) {
             return;
         }
         currentSample -= shift;
+        scanLineBufferStartSample += shift;
         leaderBreakIndex -= shift;
-        lastSyncPulseIndex -= shift;
-        for (int i = 0; i < lastSyncPulses.length; ++i) {
-            lastSyncPulses[i] -= shift;
-        }
         System.arraycopy(scanLineBuffer, shift, scanLineBuffer, 0, currentSample);
     }
 }
