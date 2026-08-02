@@ -72,6 +72,7 @@ data class ImageDecoderPalette(
 fun ImageDecoderScreen(
     state: ImageDecoderState,
     microphonePermissionGranted: Boolean,
+    sourceColorPreview: Boolean,
     palette: ImageDecoderPalette,
     onSelectDecoder: (ImageDecoderSelection) -> Unit,
     onSelectInput: (ImageAudioInput) -> Unit,
@@ -135,10 +136,15 @@ fun ImageDecoderScreen(
             } else {
                 val preview = remember(
                     frame.revision,
+                    sourceColorPreview,
                     palette.background,
                     palette.foreground,
                 ) {
-                    monochromePreview(frame, palette)
+                    if (sourceColorPreview) {
+                        colorImage(frame, palette.background.toArgb())
+                    } else {
+                        monochromePreview(frame, palette)
+                    }
                 }
                 Image(
                     bitmap = preview.asImageBitmap(),
@@ -382,15 +388,11 @@ private fun monochromePreview(
     )
 }
 
-private fun colorImage(frame: DecodedImageFrame): Bitmap {
-    require(frame.argbPixels.size == frame.width * frame.height) {
-        "Decoded image buffer does not match its dimensions"
-    }
-    val output = frame.argbPixels.copyOf()
-    val completedPixels = frame.completedLines.coerceIn(0, frame.height) * frame.width
-    if (completedPixels < output.size) {
-        output.fill(Color.Black.toArgb(), completedPixels, output.size)
-    }
+private fun colorImage(
+    frame: DecodedImageFrame,
+    incompleteArgb: Int = Color.Black.toArgb(),
+): Bitmap {
+    val output = sourceColorPreviewPixels(frame, incompleteArgb)
     return Bitmap.createBitmap(
         output,
         frame.width,

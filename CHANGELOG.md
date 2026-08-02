@@ -1,3 +1,13 @@
+## 0.36.0-dev.29 — Light-theme source-color IMG preview (2026-08-02)
+
+- Render the decoder's original reconstructed color frame directly on the IMG surface when the app is using the Light theme.
+- Preserve the established theme-aware monochrome preview in Dark and Hue themes.
+- Keep incomplete rows visually integrated with the active panel background while an image is still decoding or after a partial live-mode recovery.
+- Leave SAVE unchanged as the original decoded color PNG with black unrecovered rows, and leave SHARE unchanged as the theme-aware monochrome rendition.
+- Make the preview policy explicit from `ThemeChoice.Light` rather than inferring it from arbitrary palette colors.
+- Leave all Robot 36, Martin M1, and Martin M2 decoder and mode implementations unchanged.
+- Updated About/build metadata to `0.36.0-dev.29`, version code 68.
+
 ## 0.36.0-dev.28 — Martin M2 live decoder (2026-08-02)
 
 - Add Martin M2 SSTV decoding at 320 × 256 with VIS code 40 and the standard 73.216 ms G/B/R channel timing.

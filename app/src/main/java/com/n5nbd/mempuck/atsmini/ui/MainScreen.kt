@@ -440,6 +440,7 @@ fun MainScreen(
                                 AppTab.Image -> ImageDecoderScreen(
                                     state = imageState,
                                     microphonePermissionGranted = imageAudioPermissionGranted,
+                                    sourceColorPreview = themeChoice == ThemeChoice.Light,
                                     palette = ImageDecoderPalette(
                                         background = colors.background,
                                         foreground = colors.foreground,
