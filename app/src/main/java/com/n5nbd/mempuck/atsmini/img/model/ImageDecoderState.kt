@@ -6,6 +6,7 @@ enum class ImageDecoderSelection(val label: String) {
     MARTIN_M1("M1"),
     MARTIN_M2("M2"),
     SCOTTIE_S1("S1"),
+    SCOTTIE_S2("S2"),
     WEFAX("WEFAX"),
 }
 

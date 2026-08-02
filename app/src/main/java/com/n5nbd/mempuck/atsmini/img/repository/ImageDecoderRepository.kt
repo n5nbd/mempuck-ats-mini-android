@@ -11,6 +11,7 @@ import com.n5nbd.mempuck.atsmini.img.decoder.robot36.MartinM1Decoder
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.MartinM2Decoder
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.Robot36Decoder
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.ScottieS1Decoder
+import com.n5nbd.mempuck.atsmini.img.decoder.robot36.ScottieS2Decoder
 import com.n5nbd.mempuck.atsmini.img.diagnostics.ImageDiagnosticLogger
 import com.n5nbd.mempuck.atsmini.img.model.DecodedImageFrame
 import com.n5nbd.mempuck.atsmini.img.model.ImageAudioInput
@@ -33,6 +34,7 @@ class ImageDecoderRepository(
         MARTIN_M1,
         MARTIN_M2,
         SCOTTIE_S1,
+        SCOTTIE_S2,
     }
 
     private val applicationContext = context.applicationContext
@@ -44,6 +46,7 @@ class ImageDecoderRepository(
     private var martinM1Decoder: MartinM1Decoder? = null
     private var martinM2Decoder: MartinM2Decoder? = null
     private var scottieS1Decoder: ScottieS1Decoder? = null
+    private var scottieS2Decoder: ScottieS2Decoder? = null
     private var activeDecoder: ActiveSstvDecoder? = null
     private var autoRearmPending = false
     private var captureBuffer: PcmRingBuffer? = null
@@ -58,7 +61,7 @@ class ImageDecoderRepository(
         synchronized(sessionLock) {
             val current = state.value
             if (current.listening) {
-                // WEFAX is not a live decoder in this slice. AUTO, R36, M1, M2, and S1
+                // WEFAX is not a live decoder in this slice. AUTO, R36, M1, M2, S1, and S2
                 // can be hot-switched without interrupting AudioRecord.
                 if (decoder == ImageDecoderSelection.WEFAX || decoder == current.decoder) return
 
@@ -68,6 +71,7 @@ class ImageDecoderRepository(
                 martinM1Decoder = null
                 martinM2Decoder = null
                 scottieS1Decoder = null
+                scottieS2Decoder = null
                 activeDecoder = null
                 autoRearmPending = false
 
@@ -106,6 +110,7 @@ class ImageDecoderRepository(
             martinM1Decoder = null
             martinM2Decoder = null
             scottieS1Decoder = null
+            scottieS2Decoder = null
             activeDecoder = null
             autoRearmPending = false
             activeSampleRateHz = null
@@ -165,6 +170,7 @@ class ImageDecoderRepository(
             martinM1Decoder = null
             martinM2Decoder = null
             scottieS1Decoder = null
+            scottieS2Decoder = null
             activeDecoder = null
             autoRearmPending = false
             captureBuffer = null
@@ -254,6 +260,7 @@ class ImageDecoderRepository(
             martinM1Decoder = null
             martinM2Decoder = null
             scottieS1Decoder = null
+            scottieS2Decoder = null
             activeDecoder = null
             autoRearmPending = false
             imageReplacementProtection.clear()
@@ -332,6 +339,7 @@ class ImageDecoderRepository(
                 ActiveSstvDecoder.MARTIN_M1 -> martinM1Decoder?.process(samples, count)
                 ActiveSstvDecoder.MARTIN_M2 -> martinM2Decoder?.process(samples, count)
                 ActiveSstvDecoder.SCOTTIE_S1 -> scottieS1Decoder?.process(samples, count)
+                ActiveSstvDecoder.SCOTTIE_S2 -> scottieS2Decoder?.process(samples, count)
                 null -> {
                     robot36Decoder?.process(samples, count)
                     if (activeDecoder == null) {
@@ -343,6 +351,9 @@ class ImageDecoderRepository(
                     if (activeDecoder == null) {
                         scottieS1Decoder?.process(samples, count)
                     }
+                    if (activeDecoder == null) {
+                        scottieS2Decoder?.process(samples, count)
+                    }
                 }
             }
 
@@ -350,6 +361,7 @@ class ImageDecoderRepository(
             ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder?.process(samples, count)
             ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder?.process(samples, count)
             ImageDecoderSelection.SCOTTIE_S1 -> scottieS1Decoder?.process(samples, count)
+            ImageDecoderSelection.SCOTTIE_S2 -> scottieS2Decoder?.process(samples, count)
             ImageDecoderSelection.WEFAX -> Unit
         }
 
@@ -369,11 +381,13 @@ class ImageDecoderRepository(
                 ActiveSstvDecoder.MARTIN_M1 -> martinM1Decoder?.finishCapture(reason)
                 ActiveSstvDecoder.MARTIN_M2 -> martinM2Decoder?.finishCapture(reason)
                 ActiveSstvDecoder.SCOTTIE_S1 -> scottieS1Decoder?.finishCapture(reason)
+                ActiveSstvDecoder.SCOTTIE_S2 -> scottieS2Decoder?.finishCapture(reason)
                 null -> {
                     robot36Decoder?.finishCapture(reason)
                     martinM1Decoder?.finishCapture(reason)
                     martinM2Decoder?.finishCapture(reason)
                     scottieS1Decoder?.finishCapture(reason)
+                    scottieS2Decoder?.finishCapture(reason)
                 }
             }
 
@@ -381,6 +395,7 @@ class ImageDecoderRepository(
             ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder?.finishCapture(reason)
             ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder?.finishCapture(reason)
             ImageDecoderSelection.SCOTTIE_S1 -> scottieS1Decoder?.finishCapture(reason)
+            ImageDecoderSelection.SCOTTIE_S2 -> scottieS2Decoder?.finishCapture(reason)
             ImageDecoderSelection.WEFAX -> Unit
         }
     }
@@ -419,6 +434,7 @@ class ImageDecoderRepository(
             ImageDecoderSelection.MARTIN_M1 -> ActiveSstvDecoder.MARTIN_M1
             ImageDecoderSelection.MARTIN_M2 -> ActiveSstvDecoder.MARTIN_M2
             ImageDecoderSelection.SCOTTIE_S1 -> ActiveSstvDecoder.SCOTTIE_S1
+            ImageDecoderSelection.SCOTTIE_S2 -> ActiveSstvDecoder.SCOTTIE_S2
             else -> null
         }
         robot36Decoder = when (selection) {
@@ -465,16 +481,29 @@ class ImageDecoderRepository(
 
             else -> null
         }
+        scottieS2Decoder = when (selection) {
+            ImageDecoderSelection.AUTO,
+            ImageDecoderSelection.SCOTTIE_S2,
+            -> ScottieS2Decoder(
+                sampleRateHz,
+                scottieS2Listener(),
+                selection == ImageDecoderSelection.SCOTTIE_S2,
+            )
+
+            else -> null
+        }
     }
 
     private fun decoderPipelineReady(): Boolean = when (state.value.decoder) {
         ImageDecoderSelection.AUTO ->
             robot36Decoder != null && martinM1Decoder != null &&
-                martinM2Decoder != null && scottieS1Decoder != null
+                martinM2Decoder != null && scottieS1Decoder != null &&
+                scottieS2Decoder != null
         ImageDecoderSelection.SSTV -> robot36Decoder != null
         ImageDecoderSelection.MARTIN_M1 -> martinM1Decoder != null
         ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder != null
         ImageDecoderSelection.SCOTTIE_S1 -> scottieS1Decoder != null
+        ImageDecoderSelection.SCOTTIE_S2 -> scottieS2Decoder != null
         ImageDecoderSelection.WEFAX -> true
     }
 
@@ -510,6 +539,11 @@ class ImageDecoderRepository(
             scottieS1Listener(),
             false,
         )
+        scottieS2Decoder = ScottieS2Decoder(
+            sampleRateHz,
+            scottieS2Listener(),
+            false,
+        )
         imageReplacementProtection.arm(state.value.image?.completedLines ?: 0)
         diagnosticLogger.decoder(
             "AUTO rearmed after complete frame; retained displayed image and PCM buffer",
@@ -526,6 +560,7 @@ class ImageDecoderRepository(
         ImageDecoderSelection.MARTIN_M1 -> candidate == ActiveSstvDecoder.MARTIN_M1
         ImageDecoderSelection.MARTIN_M2 -> candidate == ActiveSstvDecoder.MARTIN_M2
         ImageDecoderSelection.SCOTTIE_S1 -> candidate == ActiveSstvDecoder.SCOTTIE_S1
+        ImageDecoderSelection.SCOTTIE_S2 -> candidate == ActiveSstvDecoder.SCOTTIE_S2
         ImageDecoderSelection.WEFAX -> false
     }
 
@@ -723,6 +758,51 @@ class ImageDecoderRepository(
             complete: Boolean,
         ) {
             writeRawFrame("SCOTTIE1", width, height, grayPixels, complete)
+        }
+    }
+
+    private fun scottieS2Listener(): ScottieS2Decoder.Listener = object : ScottieS2Decoder.Listener {
+        override fun onModeDetected(modeName: String) {
+            modeDetected(ActiveSstvDecoder.SCOTTIE_S2, modeName)
+        }
+
+        override fun onAdaptiveStatus(modeName: String, correctionHz: Int, confidence: Int) {
+            adaptiveStatus(ActiveSstvDecoder.SCOTTIE_S2, modeName, correctionHz, confidence)
+        }
+
+        override fun onFrame(
+            width: Int,
+            height: Int,
+            argbPixels: IntArray,
+            completedLines: Int,
+            complete: Boolean,
+        ) {
+            decodedFrame(
+                ActiveSstvDecoder.SCOTTIE_S2,
+                "SCOTTIE S2",
+                width,
+                height,
+                argbPixels,
+                completedLines,
+                complete,
+            )
+        }
+
+        override fun onDiagnostic(message: String) {
+            diagnosticLogger.decoder(message)
+        }
+
+        override fun onTimeline(text: String) {
+            writeTimeline("SCOTTIE2", text)
+        }
+
+        override fun onRawGrayscaleFrame(
+            width: Int,
+            height: Int,
+            grayPixels: ByteArray,
+            complete: Boolean,
+        ) {
+            writeRawFrame("SCOTTIE2", width, height, grayPixels, complete)
         }
     }
 

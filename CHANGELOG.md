@@ -1,3 +1,13 @@
+## 0.36.0-dev.32 — Scottie S2 live decoder (2026-08-02)
+
+- Add Scottie S2 SSTV decoding at 320 × 256 with VIS code 56, 88.064 ms RGB channels, and 277.692 ms line timing.
+- Add compact `S2` manual selection beside `AUTO`, `R36`, `M1`, `M2`, and `S1`.
+- Include Scottie S2 as a fifth AUTO acquisition candidate without changing the proven Robot 36, Martin M1, Martin M2, or Scottie S1 decoder and mode files.
+- Support live hot-switching and manual late-entry recovery from the next complete Scottie S2 line without restarting the microphone or replaying buffered audio.
+- Preserve completed-image protection, Light-theme source-color preview, Dark/Hue monochrome preview, partial color SAVE, and AUTO rearming.
+- Add Scottie S2 VIS, callback-frame alias, full-frame completion, manual mid-stream, wrong-VIS rejection, RGB order, and neutral-gray regression coverage.
+- Updated About/build metadata to `0.36.0-dev.32`, version code 71.
+
 ## 0.36.0-dev.31 — Scottie S1 live decoder (2026-08-02)
 
 - Add Scottie S1 SSTV decoding at 320 × 256 with VIS code 60 and the standard 428.22 ms line timing.
