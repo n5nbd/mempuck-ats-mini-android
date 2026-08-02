@@ -1,3 +1,13 @@
+## 0.36.0-dev.27 — Live manual SSTV mode switching (2026-08-02)
+
+- Rename the manual Robot 36 control from `SSTV` to the compact `R36` label.
+- Allow `AUTO`, `R36`, and `M1` to be selected while LISTEN remains active without stopping or restarting the microphone session.
+- Replace only the active decoder at a live mode change and begin manual recovery with the next PCM block; no buffered replay or catch-up worker is used.
+- Clear the old preview on a live mode change so the newly selected mode can be judged immediately from its progressive partial image.
+- Allow SAVE after at least one decoded line, preserving original decoded color and filling the unrecovered remainder of a partial frame with black.
+- Keep WEFAX unavailable during an active LISTEN session and preserve the proven AUTO reacquisition behavior between complete Robot 36 and Martin M1 images.
+- Updated About/build metadata to `0.36.0-dev.27`, version code 66.
+
 ## 0.36.0-dev.26-r3 — Protect live audio from diagnostic trace I/O (2026-08-01)
 
 - Preserve the phone-tested AUTO switching behavior from dev.26-r2 and leave both Robot 36 and Martin M1 production decoder implementations unchanged.

@@ -48,8 +48,42 @@ class ImageDecoderRepository(
     val state: StateFlow<ImageDecoderState> = _state.asStateFlow()
 
     fun selectDecoder(decoder: ImageDecoderSelection) {
-        if (state.value.listening) stopListening()
         synchronized(sessionLock) {
+            val current = state.value
+            if (current.listening) {
+                // WEFAX is not a live decoder in this slice. AUTO, R36, and M1
+                // can be hot-switched without interrupting AudioRecord.
+                if (decoder == ImageDecoderSelection.WEFAX || decoder == current.decoder) return
+
+                val sampleRateHz = activeSampleRateHz ?: current.sampleRateHz
+                robot36Decoder = null
+                martinM1Decoder = null
+                activeDecoder = null
+                autoRearmPending = false
+                frameRevision += 1
+
+                _state.update {
+                    it.copy(
+                        decoder = decoder,
+                        signal = ImageSignalState.WAITING,
+                        detectedMode = null,
+                        frequencyCorrectionHz = null,
+                        decoderConfidence = 0,
+                        image = null,
+                        error = null,
+                    )
+                }
+
+                if (sampleRateHz != null) {
+                    installDecoderPipelineLocked(decoder, sampleRateHz)
+                }
+                diagnosticLogger.decoder(
+                    "LIVE decoder_switch from=${current.decoder.label} to=${decoder.label} " +
+                        "received_samples=${current.receivedSamples}",
+                )
+                return
+            }
+
             robot36Decoder = null
             martinM1Decoder = null
             activeDecoder = null
@@ -209,7 +243,7 @@ class ImageDecoderRepository(
         }
     }
 
-    /** Reserved for the manual swipe/replay slice once additional SSTV modes are present. */
+    /** Temporary session-local PCM retained only in memory; live mode switching does not replay it. */
     internal fun capturedPcmSnapshot(): ShortArray = synchronized(sessionLock) {
         captureBuffer?.snapshot() ?: ShortArray(0)
     }
@@ -301,11 +335,6 @@ class ImageDecoderRepository(
         }
         activeSampleRateHz = sampleRateHz
         captureBuffer = PcmRingBuffer(sampleRateHz * SSTV_CAPTURE_SECONDS)
-        activeDecoder = when (state.value.decoder) {
-            ImageDecoderSelection.SSTV -> ActiveSstvDecoder.ROBOT_36
-            ImageDecoderSelection.MARTIN_M1 -> ActiveSstvDecoder.MARTIN_M1
-            else -> null
-        }
         autoRearmPending = false
         if (!diagnosticStarted) {
             diagnosticLogger.begin(
@@ -315,25 +344,37 @@ class ImageDecoderRepository(
             )
             diagnosticStarted = true
         }
+        installDecoderPipelineLocked(state.value.decoder, sampleRateHz)
+    }
 
-        robot36Decoder = when (state.value.decoder) {
+
+    private fun installDecoderPipelineLocked(
+        selection: ImageDecoderSelection,
+        sampleRateHz: Int,
+    ) {
+        activeDecoder = when (selection) {
+            ImageDecoderSelection.SSTV -> ActiveSstvDecoder.ROBOT_36
+            ImageDecoderSelection.MARTIN_M1 -> ActiveSstvDecoder.MARTIN_M1
+            else -> null
+        }
+        robot36Decoder = when (selection) {
             ImageDecoderSelection.AUTO,
             ImageDecoderSelection.SSTV,
             -> Robot36Decoder(
                 sampleRateHz,
                 robot36Listener(),
-                state.value.decoder == ImageDecoderSelection.SSTV,
+                selection == ImageDecoderSelection.SSTV,
             )
 
             else -> null
         }
-        martinM1Decoder = when (state.value.decoder) {
+        martinM1Decoder = when (selection) {
             ImageDecoderSelection.AUTO,
             ImageDecoderSelection.MARTIN_M1,
             -> MartinM1Decoder(
                 sampleRateHz,
                 martinM1Listener(),
-                state.value.decoder == ImageDecoderSelection.MARTIN_M1,
+                selection == ImageDecoderSelection.MARTIN_M1,
             )
 
             else -> null
@@ -625,8 +666,8 @@ class ImageDecoderRepository(
     }
 
     private companion object {
-        // Martin M1 lasts about 115 seconds. Keep one complete transmission in RAM
-        // for the later swipe/replay slice without writing raw audio to storage.
+        // Keep the existing session-local rolling capture in RAM only. This slice
+        // performs no replay; live manual recovery starts with the next PCM block.
         const val SSTV_CAPTURE_SECONDS = 130
     }
 }

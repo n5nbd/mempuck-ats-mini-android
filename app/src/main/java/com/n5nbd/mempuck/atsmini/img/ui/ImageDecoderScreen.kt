@@ -50,7 +50,6 @@ import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
-import java.util.Locale
 
 private val ImagePanelShape = RoundedCornerShape(5.dp)
 
@@ -85,6 +84,9 @@ fun ImageDecoderScreen(
     }
 
     val context = LocalContext.current
+    val savableFrame = state.image?.takeIf { frame ->
+        frame.completedLines > 0
+    }
     val completedFrame = state.image?.takeIf { frame ->
         state.signal == ImageSignalState.COMPLETE &&
             frame.completedLines >= frame.height
@@ -179,7 +181,7 @@ fun ImageDecoderScreen(
                     text = decoder.label,
                     selected = state.decoder == decoder,
                     palette = palette,
-                    enabled = !state.listening,
+                    enabled = !state.listening || decoder != ImageDecoderSelection.WEFAX,
                     onClick = { onSelectDecoder(decoder) },
                     modifier = Modifier.weight(1f),
                 )
@@ -234,9 +236,9 @@ fun ImageDecoderScreen(
                 text = "SAVE",
                 selected = false,
                 palette = palette,
-                enabled = completedFrame != null,
+                enabled = savableFrame != null,
                 onClick = {
-                    completedFrame?.let { frame ->
+                    savableFrame?.let { frame ->
                         saveCompletedImage(context, colorImage(frame))
                     }
                 },
@@ -384,8 +386,13 @@ private fun colorImage(frame: DecodedImageFrame): Bitmap {
     require(frame.argbPixels.size == frame.width * frame.height) {
         "Decoded image buffer does not match its dimensions"
     }
+    val output = frame.argbPixels.copyOf()
+    val completedPixels = frame.completedLines.coerceIn(0, frame.height) * frame.width
+    if (completedPixels < output.size) {
+        output.fill(Color.Black.toArgb(), completedPixels, output.size)
+    }
     return Bitmap.createBitmap(
-        frame.argbPixels.copyOf(),
+        output,
         frame.width,
         frame.height,
         Bitmap.Config.ARGB_8888,
@@ -497,11 +504,6 @@ private fun statusDetail(
     microphonePermissionGranted: Boolean,
 ): String {
     state.error?.let { return it }
-    val buffer = if (state.bufferedSamples > 0) {
-        " • BUFFER ${String.format(Locale.US, "%.1f", state.bufferedSeconds)} s"
-    } else {
-        ""
-    }
     val frame = state.image
     val adaptive = state.frequencyCorrectionHz?.let { correction ->
         val sign = if (correction >= 0) "+" else ""
@@ -509,19 +511,19 @@ private fun statusDetail(
     }.orEmpty()
     return when {
         state.signal == ImageSignalState.COMPLETE && frame != null ->
-            "${state.detectedMode ?: "SSTV"} COMPLETE • ${frame.completedLines}/${frame.height} LINES$adaptive$buffer"
+            "${state.detectedMode ?: "SSTV"} COMPLETE • ${frame.completedLines}/${frame.height} LINES$adaptive"
 
         state.signal == ImageSignalState.DECODING && frame != null ->
-            "${state.detectedMode ?: "SSTV"} • ${frame.completedLines}/${frame.height} LINES$adaptive$buffer"
+            "${state.detectedMode ?: "SSTV"} • ${frame.completedLines}/${frame.height} LINES$adaptive"
 
         state.listening && state.decoder == ImageDecoderSelection.SSTV ->
-            "LISTENING FOR ROBOT 36 SYNC; MANUAL RAW RECOVERY ENABLED$buffer"
+            "R36 LIVE MANUAL SYNC; TAP AUTO OR M1 TO SWITCH"
         state.listening && state.decoder == ImageDecoderSelection.MARTIN_M1 ->
-            "LISTENING FOR MARTIN M1 SYNC; MANUAL RAW RECOVERY ENABLED$buffer"
-        state.listening -> "LISTENING FOR ROBOT 36 OR MARTIN M1 VIS HEADER$buffer"
-        state.bufferedSamples > 0 -> "CAPTURE HELD FOR LATER MODE REPLAY$buffer"
+            "M1 LIVE MANUAL SYNC; TAP AUTO OR R36 TO SWITCH"
+        state.listening -> "LISTENING FOR R36 OR M1 VIS; MANUAL SWITCH AVAILABLE"
         !microphonePermissionGranted -> "MIC PERMISSION REQUESTS ONLY AFTER LISTEN"
         state.decoder == ImageDecoderSelection.WEFAX -> "WEFAX ENGINE FOLLOWS SSTV HARDWARE TEST"
-        else -> "ROBOT 36 + MARTIN M1 RAW/VIS READY"
+        else -> "R36 + M1 AUTO/LIVE MANUAL READY"
     }
 }
+

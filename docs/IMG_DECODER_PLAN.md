@@ -21,7 +21,7 @@ Use one large live image surface for both decoder families. Decoder selection ch
 Initial controls:
 
 ```text
-AUTO   SSTV   WEFAX
+AUTO   R36   M1   WEFAX
 MIC    USB
 LISTEN / STOP
 ```
@@ -38,9 +38,11 @@ The status line should remain compact and show the selected input, decoder state
 
 ### SSTV
 
-- Automatic VIS detection.
-- Begin with the modes already supported by the imported Robot36 decoder engine.
+- Automatic VIS detection for supported modes.
+- Compact manual mode controls (`R36`, `M1`, and later `M2`, `S1`, `S2`, `FX1`, `FX2`).
+- While LISTEN remains active, selecting a manual mode replaces only the active decoder and starts from the next live PCM block; no replay is performed.
 - Render progressively into the shared image surface.
+- Allow completed or partial images with at least one decoded line to be saved in original decoded color.
 - Preserve the detected mode in image metadata when saving.
 
 ### WEFAX
