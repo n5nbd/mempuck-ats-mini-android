@@ -21,7 +21,7 @@ Use one large live image surface for both decoder families. Decoder selection ch
 Initial controls:
 
 ```text
-AUTO   R36   M1   M2   WEFAX
+AUTO   R36   M1   M2   S1   WEFAX
 MIC    USB
 LISTEN / STOP
 ```
@@ -38,8 +38,8 @@ The status line should remain compact and show the selected input, decoder state
 
 ### SSTV
 
-- Automatic VIS detection for supported Robot 36, Martin M1, and Martin M2 modes.
-- Compact manual mode controls (`R36`, `M1`, `M2`, and later `S1`, `S2`, `FX1`, `FX2`).
+- Automatic VIS detection for supported Robot 36, Martin M1, Martin M2, and Scottie S1 modes.
+- Compact manual mode controls (`R36`, `M1`, `M2`, `S1`, and later `S2`, `FX1`, `FX2`).
 - While LISTEN remains active, selecting a manual mode replaces only the active decoder and starts from the next live PCM block; no replay is performed.
 - Render progressively into the shared image surface.
 - Show the original reconstructed color frame in the Light theme; retain theme-aware monochrome rendering in Dark and Hue themes.
@@ -133,8 +133,8 @@ On the Pixel 6 with the ATS Mini speaker audible:
 1. Open `IMG`.
 2. Select `AUTO` and `MIC`.
 3. Press LISTEN.
-4. Feed a known Robot 36 SSTV transmission.
-5. Confirm automatic mode detection and progressive image rendering.
+4. Feed a known supported SSTV transmission.
+5. Confirm automatic mode detection and progressive image rendering in Robot 36, Martin M1, Martin M2, or Scottie S1.
 6. Stop capture, save the image, and open the saved PNG outside MemPuck.
 
 WEFAX and USB input follow only after this path is stable.
