@@ -12,8 +12,8 @@ android {
         applicationId = "com.n5nbd.mempuck.atsmini"
         minSdk = 26
         targetSdk = 36
-        versionCode = 74
-        versionName = "0.36.0-dev.35"
+        versionCode = 76
+        versionName = "0.36.0-dev.37"
 
         buildConfigField("long", "BUILD_EXPIRY_UTC_MILLIS", "1789430400000L")
         buildConfigField("String", "BUILD_EXPIRY_DATE", "\"2026-09-15\"")

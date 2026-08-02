@@ -38,6 +38,7 @@ data class DecodedImageFrame(
     val completedLines: Int,
     val revision: Long,
     val continuous: Boolean = false,
+    val captureId: Long = 0L,
 )
 
 data class ImageDecoderState(
@@ -52,6 +53,9 @@ data class ImageDecoderState(
     val frequencyCorrectionHz: Int? = null,
     val decoderConfidence: Int = 0,
     val image: DecodedImageFrame? = null,
+    val recoveredCheckpoint: Boolean = false,
+    val lastAutosaveFileName: String? = null,
+    val autosaveError: String? = null,
     val error: String? = null,
 ) {
     val listening: Boolean

@@ -24,6 +24,12 @@ public final class WefaxIoc576Decoder {
         );
 
         void onDiagnostic(String message);
+
+        default void onPageStarted(String reason) {
+        }
+
+        default void onStopSignal(String reason) {
+        }
     }
 
     public static final int IMAGE_WIDTH = 1809;
@@ -82,6 +88,21 @@ public final class WefaxIoc576Decoder {
 
     private static final int PUBLISH_EVERY_LINES = 4;
 
+    private static final int APT_NONE = 0;
+    private static final int APT_START = 1;
+    private static final int APT_STOP = 2;
+    private static final double APT_START_RATE_HZ = 300.0;
+    private static final double APT_STOP_RATE_HZ = 450.0;
+    private static final double APT_INTERVAL_TOLERANCE = 0.24;
+    private static final double APT_CONFIRM_SECONDS = 0.70;
+    private static final double APT_RELEASE_SECONDS = 0.08;
+    private static final int APT_LOW_LEVEL = 116;
+    private static final int APT_HIGH_LEVEL = 140;
+
+    private static final int PAGE_PHASE_REQUIRED_INTERVALS = 8;
+    private static final double PAGE_PHASE_MIN_BLACK_SECONDS = 0.35;
+    private static final double PAGE_PHASE_SUPPRESS_SECONDS = 35.0;
+
     private final int sampleRateHz;
     private final Listener listener;
     private final boolean phaseAcquisitionEnabled;
@@ -97,11 +118,18 @@ public final class WefaxIoc576Decoder {
     private final int phaseMinWhiteRunSamples;
     private final int phaseCalibrationLossSamples;
     private final double nominalSamplesPerLine;
+    private final double aptStartHalfPeriodSamples;
+    private final double aptStopHalfPeriodSamples;
+    private final int aptConfirmSamples;
+    private final int aptReleaseSamples;
+    private final long pagePhaseSuppressSamples;
+    private final int pagePhaseMinBlackSamples;
     private final int[] lineLevelSums = new int[IMAGE_WIDTH];
     private final int[] lineLevelCounts = new int[IMAGE_WIDTH];
     private final long[] phaseEdgeSamples = new long[PHASE_EDGE_CAPACITY];
     private final double[] midClockPpmEstimates = new double[MID_CLOCK_REQUIRED_ESTIMATES];
     private final double[] midClockCorrelations = new double[MID_CLOCK_REQUIRED_ESTIMATES];
+    private final long[] pagePhaseEdgeSamples = new long[PHASE_EDGE_CAPACITY];
 
     private int[] argbPixels = new int[IMAGE_WIDTH * INITIAL_CAPACITY_LINES];
     private int capacityLines = INITIAL_CAPACITY_LINES;
@@ -139,6 +167,27 @@ public final class WefaxIoc576Decoder {
     private int consecutivePhaseIntervals;
     private boolean phaseCalibrationActive;
     private long lastCalibrationEdgeSample = -1L;
+
+    private int aptLevelState;
+    private long aptLastTransitionSample = -1L;
+    private int aptCandidateType = APT_NONE;
+    private long aptCandidateStartSample = -1L;
+    private long aptLastMatchingTransitionSample = -1L;
+    private int aptCandidateTransitions;
+    private boolean aptConfirmed;
+    private PageBoundarySnapshot aptBoundarySnapshot;
+    private boolean manualFallbackBlocked;
+
+    private boolean pagePhaseInBlackRun;
+    private int pagePhaseBlackRunSamples;
+    private int pagePhaseWhiteCandidateSamples;
+    private long pagePhaseWhiteCandidateStartSample = -1L;
+    private long pagePhasePreviousEdgeSample = -1L;
+    private int pagePhaseIntervalCount;
+    private int pagePhaseEdgeCount;
+    private PageBoundarySnapshot pagePhaseBoundarySnapshot;
+    private PageBoundarySnapshot pagePhaseBlackRunSnapshot;
+    private long pagePhaseSuppressUntilSample;
 
     private int midClockEstimateCount;
     private boolean midClockCorrectionApplied;
@@ -192,6 +241,18 @@ public final class WefaxIoc576Decoder {
         );
         this.nominalSamplesPerLine = sampleRateHz * 60.0 / LINES_PER_MINUTE;
         this.samplesPerLine = nominalSamplesPerLine;
+        this.aptStartHalfPeriodSamples = sampleRateHz / (2.0 * APT_START_RATE_HZ);
+        this.aptStopHalfPeriodSamples = sampleRateHz / (2.0 * APT_STOP_RATE_HZ);
+        this.aptConfirmSamples = Math.max(1, (int) Math.round(APT_CONFIRM_SECONDS * sampleRateHz));
+        this.aptReleaseSamples = Math.max(1, (int) Math.round(APT_RELEASE_SECONDS * sampleRateHz));
+        this.pagePhaseSuppressSamples = Math.max(
+            1L,
+            Math.round(PAGE_PHASE_SUPPRESS_SECONDS * sampleRateHz)
+        );
+        this.pagePhaseMinBlackSamples = Math.max(
+            1,
+            (int) Math.round(PAGE_PHASE_MIN_BLACK_SECONDS * sampleRateHz)
+        );
         this.phaseLocked = !phaseAcquisitionEnabled;
         if (phaseLocked) {
             phaseSource = "DISABLED";
@@ -215,6 +276,10 @@ public final class WefaxIoc576Decoder {
             int level = demodulateLevel(samples[index]);
             totalSamples++;
 
+            if (processAptSignal(level)) {
+                continue;
+            }
+
             if (!phaseLocked) {
                 acquirePhase(level);
                 continue;
@@ -222,6 +287,8 @@ public final class WefaxIoc576Decoder {
 
             if (phaseCalibrationActive) {
                 refinePhasingClock(level);
+            } else if (detectNewPagePhasing(level)) {
+                continue;
             }
             appendLevel(level);
         }
@@ -260,6 +327,361 @@ public final class WefaxIoc576Decoder {
 
     public boolean isMidImageClockCorrected() {
         return midClockCorrectionApplied;
+    }
+
+    private boolean processAptSignal(int level) {
+        int nextState = aptLevelState;
+        if (level <= APT_LOW_LEVEL) {
+            nextState = -1;
+        } else if (level >= APT_HIGH_LEVEL) {
+            nextState = 1;
+        }
+
+        if (aptConfirmed) {
+            if (
+                aptLastMatchingTransitionSample >= 0L
+                    && totalSamples - aptLastMatchingTransitionSample > aptReleaseSamples
+            ) {
+                int completedType = aptCandidateType;
+                resetAptDetector(nextState);
+                resetAcquisitionAfterAptTone();
+                listener.onDiagnostic(
+                    "WEFAX apt_release type=" + aptName(completedType)
+                        + " sample=" + totalSamples
+                );
+                return false;
+            }
+        }
+
+        if (nextState == 0 || nextState == aptLevelState) {
+            return aptConfirmed;
+        }
+
+        long transitionSample = totalSamples;
+        long interval = aptLastTransitionSample < 0L
+            ? -1L
+            : transitionSample - aptLastTransitionSample;
+        aptLastTransitionSample = transitionSample;
+        aptLevelState = nextState;
+        if (interval <= 0L) {
+            return aptConfirmed;
+        }
+
+        int intervalType = classifyAptInterval(interval);
+        if (intervalType == APT_NONE) {
+            if (!aptConfirmed) {
+                resetAptCandidate();
+            }
+            return aptConfirmed;
+        }
+
+        if (aptCandidateType != intervalType) {
+            aptCandidateType = intervalType;
+            aptCandidateStartSample = transitionSample - interval;
+            aptCandidateTransitions = 1;
+            aptBoundarySnapshot = capturePageBoundarySnapshot();
+        } else {
+            aptCandidateTransitions++;
+        }
+        aptLastMatchingTransitionSample = transitionSample;
+
+        if (
+            !aptConfirmed
+                && aptCandidateStartSample >= 0L
+                && transitionSample - aptCandidateStartSample >= aptConfirmSamples
+        ) {
+            aptConfirmed = true;
+            restorePageBoundarySnapshot(aptBoundarySnapshot);
+            listener.onDiagnostic(
+                "WEFAX apt_confirm type=" + aptName(aptCandidateType)
+                    + " transitions=" + aptCandidateTransitions
+                    + " sample=" + totalSamples
+            );
+            if (aptCandidateType == APT_START) {
+                if (completedLines > 0) {
+                    publishFrame(false);
+                }
+                listener.onPageStarted("APT_START");
+                resetForNextPage(false);
+                pagePhaseSuppressUntilSample = totalSamples + pagePhaseSuppressSamples;
+            } else {
+                if (completedLines > 0) {
+                    publishFrame(true);
+                }
+                listener.onStopSignal("APT_STOP");
+                resetForNextPage(true);
+            }
+        }
+        return aptConfirmed;
+    }
+
+    private int classifyAptInterval(long intervalSamples) {
+        double startError = Math.abs(intervalSamples - aptStartHalfPeriodSamples)
+            / aptStartHalfPeriodSamples;
+        double stopError = Math.abs(intervalSamples - aptStopHalfPeriodSamples)
+            / aptStopHalfPeriodSamples;
+        double bestError = Math.min(startError, stopError);
+        if (bestError > APT_INTERVAL_TOLERANCE) {
+            return APT_NONE;
+        }
+        return startError <= stopError ? APT_START : APT_STOP;
+    }
+
+    private void resetAptCandidate() {
+        aptCandidateType = APT_NONE;
+        aptCandidateStartSample = -1L;
+        aptLastMatchingTransitionSample = -1L;
+        aptCandidateTransitions = 0;
+        aptBoundarySnapshot = null;
+    }
+
+    private void resetAptDetector(int currentLevelState) {
+        aptLevelState = currentLevelState;
+        aptLastTransitionSample = -1L;
+        aptConfirmed = false;
+        resetAptCandidate();
+    }
+
+    private void resetAcquisitionAfterAptTone() {
+        carrierReady = false;
+        activeRunSamples = 0;
+        inactiveRunSamples = 0;
+        activeAcquisitionSamples = 0;
+        inBlackRun = false;
+        blackRunSamples = 0;
+        whiteCandidateSamples = 0;
+        whiteCandidateStartSample = -1L;
+        previousWhiteEdgeSample = -1L;
+        phaseEdgeCount = 0;
+        consecutivePhaseIntervals = 0;
+    }
+
+    private String aptName(int type) {
+        if (type == APT_START) return "START_300";
+        if (type == APT_STOP) return "STOP_450";
+        return "NONE";
+    }
+
+    private boolean detectNewPagePhasing(int level) {
+        if (
+            totalSamples < pagePhaseSuppressUntilSample
+                || completedLines <= 0
+                || aptConfirmed
+        ) {
+            return false;
+        }
+
+        long edgeSample = detectPageBoundaryPhasingEdge(level);
+        if (edgeSample < 0L) {
+            return false;
+        }
+        if (pagePhasePreviousEdgeSample < 0L) {
+            startPageBoundaryPhaseSequence(edgeSample);
+            return false;
+        }
+
+        long interval = edgeSample - pagePhasePreviousEdgeSample;
+        if (interval < phaseIntervalMinSamples || interval > phaseIntervalMaxSamples) {
+            startPageBoundaryPhaseSequence(edgeSample);
+            return false;
+        }
+
+        pagePhasePreviousEdgeSample = edgeSample;
+        pagePhaseIntervalCount++;
+        appendPageBoundaryPhaseEdge(edgeSample);
+        if (pagePhaseIntervalCount < PAGE_PHASE_REQUIRED_INTERVALS) {
+            return false;
+        }
+
+        long[] acceptedEdges = Arrays.copyOf(pagePhaseEdgeSamples, pagePhaseEdgeCount);
+        int acceptedEdgeCount = pagePhaseEdgeCount;
+        int acceptedIntervalCount = pagePhaseIntervalCount;
+        restorePageBoundarySnapshot(pagePhaseBoundarySnapshot);
+        if (completedLines > 0) {
+            publishFrame(false);
+        }
+        listener.onPageStarted("PHASING");
+        resetForNextPage(false);
+
+        // A fresh LISTEN does not begin drawing as soon as the minimum phasing
+        // match is reached. It keeps refining the line clock for the remainder
+        // of the phasing train, then releases into the picture. Preserve that
+        // exact behavior across unattended rollover so one noisy early average
+        // cannot leave the next page with severe accumulated skew.
+        installAcceptedPhaseEdges(acceptedEdges, acceptedEdgeCount);
+        PhaseFit fit = robustPhaseFit();
+        double elapsedSinceEdge = totalSamples - fit.predictedLastEdgeSample;
+        lockPhase(
+            "PHASING_RESTART",
+            fit.samplesPerLine,
+            elapsedSinceEdge,
+            fit.medianResidualSamples
+        );
+        phaseCalibrationActive = true;
+        lastCalibrationEdgeSample = previousWhiteEdgeSample;
+        pagePhaseSuppressUntilSample = totalSamples + pagePhaseSuppressSamples;
+        listener.onDiagnostic(
+            "WEFAX new_page_phasing intervals=" + acceptedIntervalCount
+                + " samples_per_line=" + format3(samplesPerLine)
+                + " fit_residual_samples=" + format1(fit.medianResidualSamples)
+                + " refining=true"
+                + " sample=" + totalSamples
+        );
+        appendLevel(level);
+        return true;
+    }
+
+    private long detectPageBoundaryPhasingEdge(int level) {
+        if (level <= PHASE_BLACK_LEVEL) {
+            if (!pagePhaseInBlackRun) {
+                pagePhaseInBlackRun = true;
+                pagePhaseBlackRunSamples = 1;
+                pagePhaseBlackRunSnapshot = capturePageBoundarySnapshot();
+            } else {
+                pagePhaseBlackRunSamples++;
+            }
+            pagePhaseWhiteCandidateSamples = 0;
+            pagePhaseWhiteCandidateStartSample = -1L;
+            return -1L;
+        }
+        if (!pagePhaseInBlackRun) {
+            return -1L;
+        }
+        if (pagePhaseBlackRunSamples < pagePhaseMinBlackSamples) {
+            if (level >= PHASE_WHITE_LEVEL) {
+                pagePhaseInBlackRun = false;
+                pagePhaseBlackRunSamples = 0;
+                pagePhaseBlackRunSnapshot = null;
+            }
+            return -1L;
+        }
+        if (level < PHASE_WHITE_LEVEL) {
+            return -1L;
+        }
+        if (pagePhaseWhiteCandidateSamples == 0) {
+            pagePhaseWhiteCandidateStartSample = totalSamples;
+        }
+        pagePhaseWhiteCandidateSamples++;
+        if (pagePhaseWhiteCandidateSamples < phaseMinWhiteRunSamples) {
+            return -1L;
+        }
+        long edgeSample = pagePhaseWhiteCandidateStartSample;
+        pagePhaseInBlackRun = false;
+        pagePhaseBlackRunSamples = 0;
+        pagePhaseWhiteCandidateSamples = 0;
+        pagePhaseWhiteCandidateStartSample = -1L;
+        return edgeSample;
+    }
+
+    private void startPageBoundaryPhaseSequence(long edgeSample) {
+        pagePhasePreviousEdgeSample = edgeSample;
+        pagePhaseIntervalCount = 0;
+        pagePhaseEdgeCount = 1;
+        pagePhaseEdgeSamples[0] = edgeSample;
+        pagePhaseBoundarySnapshot = pagePhaseBlackRunSnapshot != null
+            ? pagePhaseBlackRunSnapshot
+            : capturePageBoundarySnapshot();
+        pagePhaseBlackRunSnapshot = null;
+    }
+
+    private void appendPageBoundaryPhaseEdge(long edgeSample) {
+        if (pagePhaseEdgeCount < pagePhaseEdgeSamples.length) {
+            pagePhaseEdgeSamples[pagePhaseEdgeCount] = edgeSample;
+            pagePhaseEdgeCount++;
+            return;
+        }
+        System.arraycopy(
+            pagePhaseEdgeSamples,
+            1,
+            pagePhaseEdgeSamples,
+            0,
+            pagePhaseEdgeSamples.length - 1
+        );
+        pagePhaseEdgeSamples[pagePhaseEdgeSamples.length - 1] = edgeSample;
+    }
+
+    private void installAcceptedPhaseEdges(long[] acceptedEdges, int acceptedEdgeCount) {
+        int safeCount = Math.max(
+            0,
+            Math.min(
+                Math.min(acceptedEdgeCount, acceptedEdges.length),
+                phaseEdgeSamples.length
+            )
+        );
+        Arrays.fill(phaseEdgeSamples, 0L);
+        if (safeCount > 0) {
+            System.arraycopy(acceptedEdges, 0, phaseEdgeSamples, 0, safeCount);
+            previousWhiteEdgeSample = phaseEdgeSamples[safeCount - 1];
+        } else {
+            previousWhiteEdgeSample = -1L;
+        }
+        phaseEdgeCount = safeCount;
+        consecutivePhaseIntervals = Math.max(0, safeCount - 1);
+    }
+
+    private PageBoundarySnapshot capturePageBoundarySnapshot() {
+        if (!phaseLocked || completedLines <= 0) {
+            return null;
+        }
+        return new PageBoundarySnapshot(
+            completedLines,
+            linePositionSamples,
+            Arrays.copyOf(lineLevelSums, lineLevelSums.length),
+            Arrays.copyOf(lineLevelCounts, lineLevelCounts.length)
+        );
+    }
+
+    private void restorePageBoundarySnapshot(PageBoundarySnapshot snapshot) {
+        if (snapshot == null) {
+            return;
+        }
+        completedLines = snapshot.completedLines;
+        linePositionSamples = snapshot.linePositionSamples;
+        System.arraycopy(
+            snapshot.lineLevelSums,
+            0,
+            lineLevelSums,
+            0,
+            lineLevelSums.length
+        );
+        System.arraycopy(
+            snapshot.lineLevelCounts,
+            0,
+            lineLevelCounts,
+            0,
+            lineLevelCounts.length
+        );
+    }
+
+    private void resetForNextPage(boolean blockManualFallback) {
+        completedLines = 0;
+        samplesPerLine = nominalSamplesPerLine;
+        linePositionSamples = 0.0;
+        phaseSource = "UNLOCKED";
+        phaseLocked = false;
+        phaseCalibrationActive = false;
+        lastCalibrationEdgeSample = -1L;
+        Arrays.fill(lineLevelSums, 0);
+        Arrays.fill(lineLevelCounts, 0);
+        resetAcquisitionAfterAptTone();
+        resetPageBoundaryPhaseDetector();
+        midClockEstimateCount = 0;
+        midClockCorrectionApplied = false;
+        Arrays.fill(midClockPpmEstimates, 0.0);
+        Arrays.fill(midClockCorrelations, 0.0);
+        manualFallbackBlocked = blockManualFallback;
+    }
+
+    private void resetPageBoundaryPhaseDetector() {
+        pagePhaseInBlackRun = false;
+        pagePhaseBlackRunSamples = 0;
+        pagePhaseWhiteCandidateSamples = 0;
+        pagePhaseWhiteCandidateStartSample = -1L;
+        pagePhasePreviousEdgeSample = -1L;
+        pagePhaseIntervalCount = 0;
+        pagePhaseEdgeCount = 0;
+        pagePhaseBoundarySnapshot = null;
+        pagePhaseBlackRunSnapshot = null;
     }
 
     private int demodulateLevel(short pcmSample) {
@@ -341,7 +763,10 @@ public final class WefaxIoc576Decoder {
             return;
         }
 
-        if (activeAcquisitionSamples >= phaseAcquireTimeoutActiveSamples) {
+        if (
+            !manualFallbackBlocked
+                && activeAcquisitionSamples >= phaseAcquireTimeoutActiveSamples
+        ) {
             lockPhase("MANUAL_TIMEOUT", nominalSamplesPerLine, 0.0, 0.0);
             appendLevel(level);
         }
@@ -408,6 +833,9 @@ public final class WefaxIoc576Decoder {
 
         PhaseFit fit = robustPhaseFit();
         double elapsedSinceEdge = totalSamples - fit.predictedLastEdgeSample;
+        if (manualFallbackBlocked) {
+            listener.onPageStarted("PHASING_AFTER_STOP");
+        }
         lockPhase("PHASING", fit.samplesPerLine, elapsedSinceEdge, fit.medianResidualSamples);
         phaseCalibrationActive = true;
         lastCalibrationEdgeSample = edgeSample;
@@ -560,6 +988,10 @@ public final class WefaxIoc576Decoder {
     ) {
         phaseLocked = true;
         phaseSource = source;
+        manualFallbackBlocked = false;
+        if ("PHASING".equals(source)) {
+            pagePhaseSuppressUntilSample = totalSamples + pagePhaseSuppressSamples;
+        }
         samplesPerLine = clamp(
             selectedSamplesPerLine,
             phaseIntervalMinSamples,
@@ -1017,6 +1449,25 @@ public final class WefaxIoc576Decoder {
 
     private static String format4(double value) {
         return String.format(Locale.US, "%.4f", value);
+    }
+
+    private static final class PageBoundarySnapshot {
+        final int completedLines;
+        final double linePositionSamples;
+        final int[] lineLevelSums;
+        final int[] lineLevelCounts;
+
+        PageBoundarySnapshot(
+            int completedLines,
+            double linePositionSamples,
+            int[] lineLevelSums,
+            int[] lineLevelCounts
+        ) {
+            this.completedLines = completedLines;
+            this.linePositionSamples = linePositionSamples;
+            this.lineLevelSums = lineLevelSums;
+            this.lineLevelCounts = lineLevelCounts;
+        }
     }
 
     private static final class PhaseFit {

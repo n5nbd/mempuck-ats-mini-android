@@ -1,3 +1,28 @@
+## 0.36.0-dev.37 — WEFAX rollover timing release and saved-image OPEN (2026-08-02)
+
+- Keep the proven dev.36 unattended SSTV and WEFAX autosave pipeline unchanged.
+- After repeated WEFAX phasing identifies a real new page, carry the accepted edge train into the same robust clock-refinement path used by a fresh LISTEN session instead of immediately drawing from an early average.
+- Continue refining samples-per-line through the remainder of the new page phasing train, then release into image rendering only after phasing ends; this prevents severe skew from stale or under-refined rollover timing.
+- Replace the redundant IMG `SHARE` button with `OPEN`; Android gallery applications remain responsible for sharing.
+- Let `OPEN` select any saved image through Android's document picker, display it on the shared IMG surface, and open it directly in the existing non-destructive correction editor.
+- Keep SAVE non-destructive for opened images: corrected output is written as a new PNG while the selected gallery original remains untouched.
+- Clear an opened image when LISTEN begins, and let CLEAR dismiss an opened image without altering the saved original.
+- Add a rollover regression with a completed first page, jittered phasing on the next page, continued timing refinement, and a long vertically stable second image.
+- Keep the development expiry at 2026-09-15 and identify the test build as `0.36.0-dev.37`, version code 76.
+
+## 0.36.0-dev.36 — Unattended IMG autosave and recovery (2026-08-02)
+
+- Keep IMG LISTEN armed across multiple SSTV and WEFAX transmissions without requiring CLEAR or a new LISTEN session between images.
+- Autosave each useful completed or partial original decoder frame before a new SSTV VIS header, a real WEFAX page boundary, live decoder replacement, CLEAR, STOP, lifecycle shutdown, or audio failure can replace it.
+- Rearm AUTO and every manual SSTV decoder after completion while retaining the finished image until the next decoder produces an actual image line.
+- Recognize standard WEFAX APT start/stop signaling and conservative repeated phasing as real page boundaries; save the completed chart at stop while leaving LISTEN active for the next page.
+- Preserve no-signal WEFAX as one open-ended strip with no invented boundaries; save it only on an explicit session boundary or a real later page signal.
+- Store one private atomic progressive checkpoint for process-death recovery without placing intermediate checkpoints in the gallery.
+- Name unattended gallery saves by decoder and timestamp, such as `MemPuck-WX-20260802-164812.png` and `MemPuck-R36-20260802-165403.png`.
+- Keep unattended autosave tied to the original received frame; accepted correction-editor output remains a separate deliberate SAVE or SHARE.
+- Preserve decoder image geometry, established clock correction, FIT/ZOOM and panning, screen-awake behavior, and the dev.35 correction editor.
+- Keep the development expiry at 2026-09-15 and identify the test build as `0.36.0-dev.36`, version code 75.
+
 ## 0.36.0-dev.35 — Completed-image correction editor (2026-08-02)
 
 - Open a non-destructive correction editor by double-tapping a completed IMG frame while LISTEN is inactive.

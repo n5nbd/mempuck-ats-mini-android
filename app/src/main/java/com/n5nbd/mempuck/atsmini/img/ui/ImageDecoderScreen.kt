@@ -1,11 +1,13 @@
 package com.n5nbd.mempuck.atsmini.img.ui
 
 import android.content.ContentValues
-import android.content.Intent
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -44,7 +46,6 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
-import androidx.core.content.FileProvider
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
@@ -61,8 +62,6 @@ import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderSelection
 import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderSession
 import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderState
 import com.n5nbd.mempuck.atsmini.img.model.ImageSignalState
-import java.io.File
-import java.io.FileOutputStream
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
 import kotlin.math.roundToInt
@@ -113,12 +112,37 @@ fun ImageDecoderScreen(
     }
 
     val context = LocalContext.current
-    val sourceFrame = state.image
+    var openedFrame by remember { mutableStateOf<DecodedImageFrame?>(null) }
+    val sourceFrame = openedFrame ?: state.image
     var acceptedCorrection by remember(sourceFrame?.revision) {
         mutableStateOf(ImageCorrection())
     }
-    var correctionEditorOpen by remember(sourceFrame?.revision) {
+    var correctionEditorOpen by remember {
         mutableStateOf(false)
+    }
+    val imagePicker = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument(),
+    ) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        runCatching {
+            loadPickedImage(context, uri)
+        }.onSuccess { frame ->
+            openedFrame = frame
+            correctionEditorOpen = true
+        }.onFailure { failure ->
+            Toast.makeText(
+                context,
+                "IMAGE OPEN FAILED: ${failure.message ?: failure::class.java.simpleName}",
+                Toast.LENGTH_LONG,
+            ).show()
+        }
+    }
+
+    LaunchedEffect(state.listening) {
+        if (state.listening) {
+            openedFrame = null
+            correctionEditorOpen = false
+        }
     }
     val workingFrame = remember(sourceFrame?.revision, acceptedCorrection) {
         sourceFrame?.let { frame -> applyImageCorrection(frame, acceptedCorrection) }
@@ -127,12 +151,9 @@ fun ImageDecoderScreen(
         frame.completedLines > 0
     }
     val completedSourceFrame = sourceFrame?.takeIf { frame ->
-        state.signal == ImageSignalState.COMPLETE &&
-            (frame.continuous || frame.completedLines >= frame.height)
-    }
-    val completedFrame = workingFrame?.takeIf { frame ->
-        completedSourceFrame != null &&
-            (frame.continuous || frame.completedLines >= frame.height)
+        openedFrame != null ||
+            (state.signal == ImageSignalState.COMPLETE &&
+                (frame.continuous || frame.completedLines >= frame.height))
     }
 
     ImagePanel(palette = palette) {
@@ -269,7 +290,15 @@ fun ImageDecoderScreen(
             selected = state.listening,
             palette = palette,
             enabled = state.input.available,
-            onClick = if (state.listening) onStop else onListen,
+            onClick = if (state.listening) {
+                onStop
+            } else {
+                {
+                    openedFrame = null
+                    correctionEditorOpen = false
+                    onListen()
+                }
+            },
             modifier = Modifier.fillMaxWidth(),
             height = 48,
         )
@@ -285,7 +314,14 @@ fun ImageDecoderScreen(
                 selected = false,
                 palette = palette,
                 enabled = true,
-                onClick = onClear,
+                onClick = {
+                    if (openedFrame != null) {
+                        openedFrame = null
+                        correctionEditorOpen = false
+                    } else {
+                        onClear()
+                    }
+                },
                 modifier = Modifier.weight(1f),
             )
             ImageButton(
@@ -301,14 +337,12 @@ fun ImageDecoderScreen(
                 modifier = Modifier.weight(1f),
             )
             ImageButton(
-                text = "SHARE",
+                text = "OPEN",
                 selected = false,
                 palette = palette,
-                enabled = completedFrame != null,
+                enabled = !state.listening,
                 onClick = {
-                    completedFrame?.let { frame ->
-                        shareCompletedImage(context, monochromePreview(frame, palette))
-                    }
+                    imagePicker.launch(arrayOf("image/*"))
                 },
                 modifier = Modifier.weight(1f),
             )
@@ -964,26 +998,40 @@ private fun saveCompletedImage(context: android.content.Context, bitmap: Bitmap)
     }
 }
 
-private fun shareCompletedImage(context: android.content.Context, bitmap: Bitmap) {
-    runCatching {
-        val shareDirectory = File(context.cacheDir, "shared-images").apply { mkdirs() }
-        val file = File(shareDirectory, imageFileName())
-        FileOutputStream(file).use { output ->
-            check(bitmap.compress(Bitmap.CompressFormat.PNG, 100, output))
+private fun loadPickedImage(
+    context: android.content.Context,
+    uri: android.net.Uri,
+): DecodedImageFrame {
+    val bitmap = context.contentResolver.openInputStream(uri)?.use { input ->
+        BitmapFactory.decodeStream(input)
+    } ?: error("Could not decode the selected image")
+    try {
+        require(bitmap.width > 0 && bitmap.height > 0) {
+            "Selected image has invalid dimensions"
         }
-        val uri = FileProvider.getUriForFile(
-            context,
-            "${context.packageName}.fileprovider",
-            file,
+        val pixelCount = bitmap.width.toLong() * bitmap.height.toLong()
+        require(pixelCount <= Int.MAX_VALUE) {
+            "Selected image is too large"
+        }
+        val pixels = IntArray(pixelCount.toInt())
+        bitmap.getPixels(
+            pixels,
+            0,
+            bitmap.width,
+            0,
+            0,
+            bitmap.width,
+            bitmap.height,
         )
-        val intent = Intent(Intent.ACTION_SEND).apply {
-            type = "image/png"
-            putExtra(Intent.EXTRA_STREAM, uri)
-            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(Intent.createChooser(intent, "SHARE MEMPUCK IMAGE"))
-    }.onFailure {
-        Toast.makeText(context, "IMAGE SHARE FAILED", Toast.LENGTH_SHORT).show()
+        return DecodedImageFrame(
+            width = bitmap.width,
+            height = bitmap.height,
+            argbPixels = pixels,
+            completedLines = bitmap.height,
+            revision = System.nanoTime(),
+        )
+    } finally {
+        bitmap.recycle()
     }
 }
 
@@ -1010,20 +1058,37 @@ private fun statusDetail(
     microphonePermissionGranted: Boolean,
 ): String {
     state.error?.let { return it }
+    state.autosaveError?.let { return "AUTOSAVE FAILED • $it" }
     val frame = state.image
+    if (state.recoveredCheckpoint && frame != null) {
+        val dimensions = if (frame.continuous) {
+            "${frame.completedLines} LINES"
+        } else {
+            "${frame.completedLines}/${frame.height} LINES"
+        }
+        return "RECOVERED CHECKPOINT • $dimensions • SAVE OR LISTEN TO CONTINUE"
+    }
     val adaptive = state.frequencyCorrectionHz?.let { correction ->
         val sign = if (correction >= 0) "+" else ""
         " • CORR $sign${correction} Hz • ${state.decoderConfidence}%"
     }.orEmpty()
     return when {
         state.signal == ImageSignalState.COMPLETE && frame?.continuous == true ->
-            "${state.detectedMode ?: "WEFAX"} COMPLETE • ${frame.completedLines} LINES"
+            if (state.listening) {
+                "${state.detectedMode ?: "WEFAX"} COMPLETE • ${frame.completedLines} LINES • LISTENING FOR NEXT PAGE"
+            } else {
+                "${state.detectedMode ?: "WEFAX"} COMPLETE • ${frame.completedLines} LINES"
+            }
 
         state.signal == ImageSignalState.DECODING && frame?.continuous == true ->
-            "${state.detectedMode ?: "WEFAX"} • ${frame.completedLines} LINES • STOP TO FINISH"
+            "${state.detectedMode ?: "WEFAX"} • ${frame.completedLines} LINES • LISTENING"
 
         state.signal == ImageSignalState.COMPLETE && frame != null ->
-            "${state.detectedMode ?: "SSTV"} COMPLETE • ${frame.completedLines}/${frame.height} LINES$adaptive"
+            if (state.listening) {
+                "${state.detectedMode ?: "SSTV"} COMPLETE • ${frame.completedLines}/${frame.height} LINES • LISTENING FOR NEXT VIS$adaptive"
+            } else {
+                "${state.detectedMode ?: "SSTV"} COMPLETE • ${frame.completedLines}/${frame.height} LINES$adaptive"
+            }
 
         state.signal == ImageSignalState.DECODING && frame != null ->
             "${state.detectedMode ?: "SSTV"} • ${frame.completedLines}/${frame.height} LINES$adaptive"

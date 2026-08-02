@@ -263,6 +263,165 @@ class WefaxIoc576DecoderTest {
         assertEquals(6_000.0, decoder.samplesPerLine, 0.001)
     }
 
+
+    @Test
+    fun standardAptStartAndStopRollPagesWhileDecoderStaysArmed() {
+        val sampleRate = 12_000
+        val listener = RecordingListener()
+        val decoder = WefaxIoc576Decoder(sampleRate, listener, true)
+        val generator = ToneGenerator(sampleRate)
+
+        feedInIrregularChunks(decoder, generator.aptTone(seconds = 5, rateHz = 300.0))
+        feedInIrregularChunks(
+            decoder,
+            generator.lines(lineCount = 20, samplesPerLine = sampleRate / 2) { position, length ->
+                if (position < length / 20) {
+                    WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+                } else {
+                    WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+                }
+            },
+        )
+        feedInIrregularChunks(
+            decoder,
+            generator.lines(lineCount = 12, samplesPerLine = sampleRate / 2) { position, length ->
+                if (position < length / 2) {
+                    WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+                } else {
+                    WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+                }
+            },
+        )
+        assertTrue(listener.completedLines > 0)
+
+        feedInIrregularChunks(decoder, generator.aptTone(seconds = 5, rateHz = 450.0))
+
+        assertEquals(1, listener.pageStarts)
+        assertEquals(1, listener.stopSignals)
+        assertEquals(1, listener.completeFrames)
+        assertTrue(listener.complete)
+
+        feedInIrregularChunks(decoder, generator.aptTone(seconds = 5, rateHz = 300.0))
+        feedInIrregularChunks(
+            decoder,
+            generator.lines(lineCount = 12, samplesPerLine = sampleRate / 2) { position, length ->
+                if (position < length / 20) {
+                    WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+                } else {
+                    WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+                }
+            },
+        )
+
+        assertEquals(2, listener.pageStarts)
+        assertTrue(listener.completedLines > 0)
+        assertFalse(listener.complete)
+    }
+
+    @Test
+    fun repeatedStandardPhasingRollsAnOpenEndedStripOnlyAfterConservativeMatch() {
+        val sampleRate = 12_000
+        val listener = RecordingListener()
+        val decoder = WefaxIoc576Decoder(sampleRate, listener, false)
+        val generator = ToneGenerator(sampleRate)
+
+        feedInIrregularChunks(
+            decoder,
+            generator.lines(lineCount = 20, samplesPerLine = sampleRate / 2) { position, length ->
+                if (position < length / 2) {
+                    WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+                } else {
+                    WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+                }
+            },
+        )
+        assertEquals(0, listener.pageStarts)
+
+        feedInIrregularChunks(
+            decoder,
+            generator.lines(lineCount = 12, samplesPerLine = sampleRate / 2) { position, length ->
+                if (position < length / 20) {
+                    WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+                } else {
+                    WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+                }
+            },
+        )
+
+        assertEquals(1, listener.pageStarts)
+        assertTrue(listener.diagnostics.any { it.contains("new_page_phasing") })
+    }
+
+    @Test
+    fun rolloverContinuesRobustPhasingRefinementBeforeDrawingNextPage() {
+        val sampleRate = 12_000
+        val transmittedSamplesPerLine = 5_999
+        val listener = RecordingListener()
+        val decoder = WefaxIoc576Decoder(sampleRate, listener, false)
+        val generator = ToneGenerator(sampleRate)
+
+        // Establish a useful first page so the repeated phasing train is treated
+        // as a rollover rather than initial acquisition.
+        feedInIrregularChunks(
+            decoder,
+            generator.lines(lineCount = 24, samplesPerLine = sampleRate / 2) { position, length ->
+                if (position < length / 2) {
+                    WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+                } else {
+                    WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+                }
+            },
+        )
+
+        val edgeJitter = intArrayOf(
+            130, -10, 8, -7, 5, -4, 3, -2,
+            2, -1, 1, 0, 0, 0, 0, -110,
+        )
+        feedInIrregularChunks(
+            decoder,
+            generator.linesWithIndex(
+                lineCount = edgeJitter.size,
+                samplesPerLine = transmittedSamplesPerLine,
+            ) { line, position, lineLength ->
+                val edge = 180 + edgeJitter[line]
+                if (position in edge until edge + lineLength * 5 / 100) {
+                    WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+                } else {
+                    WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+                }
+            },
+        )
+
+        val picture = generator.lines(
+            lineCount = 90,
+            samplesPerLine = transmittedSamplesPerLine,
+        ) { position, lineLength ->
+            val pixel = position * WefaxIoc576Decoder.IMAGE_WIDTH / lineLength
+            if (pixel in 280 until 310 || pixel in 1_180 until 1_220) {
+                WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+            } else {
+                WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+            }
+        }
+        feedInIrregularChunks(decoder, picture)
+        decoder.finishCapture("TEST_STOP")
+
+        assertEquals(1, listener.pageStarts)
+        assertEquals("PHASING_RESTART", decoder.phaseSource)
+        assertTrue(abs(decoder.samplesPerLine - transmittedSamplesPerLine) < 1.0)
+        assertTrue(listener.diagnostics.any {
+            it.contains("new_page_phasing") && it.contains("refining=true")
+        })
+        assertTrue(listener.diagnostics.any {
+            it.contains("phase_calibration_complete")
+        })
+        val firstMarker = listener.darkRunStart(10)
+        val lastMarker = listener.darkRunStart(listener.completedLines - 3)
+        assertTrue(firstMarker >= 0)
+        assertTrue(lastMarker >= 0)
+        assertTrue(abs(firstMarker - lastMarker) <= 16)
+    }
+
     @Test
     fun finishPublishesManualStopAsComplete() {
         val listener = RecordingListener()
@@ -287,6 +446,9 @@ class WefaxIoc576DecoderTest {
         var completedLines = 0
         var pixels = IntArray(0)
         var complete = false
+        var pageStarts = 0
+        var stopSignals = 0
+        var completeFrames = 0
         val diagnostics = mutableListOf<String>()
 
         override fun onModeDetected(modeName: String) = Unit
@@ -303,6 +465,15 @@ class WefaxIoc576DecoderTest {
             this.completedLines = completedLines
             this.pixels = argbPixels
             this.complete = complete
+            if (complete) completeFrames++
+        }
+
+        override fun onPageStarted(reason: String) {
+            pageStarts++
+        }
+
+        override fun onStopSignal(reason: String) {
+            stopSignals++
         }
 
         override fun onDiagnostic(message: String) {
@@ -330,6 +501,21 @@ class WefaxIoc576DecoderTest {
 
     private class ToneGenerator(private val sampleRate: Int) {
         private var phase = 0.0
+
+        fun aptTone(seconds: Int, rateHz: Double): ShortArray {
+            val output = ShortArray(sampleRate * seconds)
+            output.indices.forEach { index ->
+                val frequency = if (sin(2.0 * PI * rateHz * index / sampleRate) >= 0.0) {
+                    WefaxIoc576Decoder.WHITE_FREQUENCY_HZ
+                } else {
+                    WefaxIoc576Decoder.BLACK_FREQUENCY_HZ
+                }
+                phase += 2.0 * PI * frequency / sampleRate
+                if (phase >= 2.0 * PI) phase -= 2.0 * PI
+                output[index] = (16_000.0 * sin(phase)).roundToInt().toShort()
+            }
+            return output
+        }
 
         fun lines(
             lineCount: Int,

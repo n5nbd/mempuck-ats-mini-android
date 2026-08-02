@@ -3,6 +3,7 @@ package com.n5nbd.mempuck.atsmini.img.repository
 import android.Manifest
 import android.content.Context
 import android.content.pm.PackageManager
+import android.os.SystemClock
 import androidx.core.content.ContextCompat
 import com.n5nbd.mempuck.atsmini.img.audio.ImageAudioSource
 import com.n5nbd.mempuck.atsmini.img.audio.MicrophoneImageAudioSource
@@ -40,7 +41,23 @@ class ImageDecoderRepository(
 
     private val applicationContext = context.applicationContext
     private val sessionLock = Any()
-    private val _state = MutableStateFlow(ImageDecoderState())
+    private val captureStore = ImageCaptureStore(applicationContext)
+    private val recoveredCapture = captureStore.loadRecovery()
+    private val _state = MutableStateFlow(
+        recoveredCapture?.let { recovered ->
+            ImageDecoderState(
+                decoder = recovered.decoder,
+                signal = if (recovered.complete) {
+                    ImageSignalState.COMPLETE
+                } else {
+                    ImageSignalState.DECODING
+                },
+                detectedMode = recovered.detectedMode,
+                image = recovered.toFrame(revision = 1L),
+                recoveredCheckpoint = true,
+            )
+        } ?: ImageDecoderState(),
+    )
     private val diagnosticLogger = ImageDiagnosticLogger(applicationContext)
 
     private var robot36Decoder: Robot36Decoder? = null
@@ -50,10 +67,19 @@ class ImageDecoderRepository(
     private var scottieS2Decoder: ScottieS2Decoder? = null
     private var wefaxDecoder: WefaxIoc576Decoder? = null
     private var activeDecoder: ActiveSstvDecoder? = null
-    private var autoRearmPending = false
+    private var sstvRearmPending = false
     private var captureBuffer: PcmRingBuffer? = null
     private var activeSampleRateHz: Int? = null
-    private var frameRevision = 0L
+    private var frameRevision = if (recoveredCapture == null) 0L else 1L
+    private var captureIdSequence = maxOf(
+        System.currentTimeMillis(),
+        recoveredCapture?.captureId ?: 0L,
+    )
+    private var currentCaptureId = recoveredCapture?.captureId ?: 0L
+    private var pendingCaptureId: Long? = null
+    private var lastCheckpointElapsedMs = 0L
+    private val autosavePendingCaptureIds = mutableSetOf<Long>()
+    private val autosavedCaptureIds = mutableSetOf<Long>()
     private var diagnosticStarted = false
     private val imageReplacementProtection = ImageReplacementProtection()
 
@@ -68,7 +94,11 @@ class ImageDecoderRepository(
                 if (decoder == current.decoder) return
 
                 val sampleRateHz = activeSampleRateHz ?: current.sampleRateHz
+                autosaveCurrentFrameLocked("LIVE_DECODER_SWITCH")
                 imageReplacementProtection.arm(current.image?.completedLines ?: 0)
+                pendingCaptureId = nextCaptureIdLocked()
+                currentCaptureId = 0L
+                lastCheckpointElapsedMs = 0L
                 robot36Decoder = null
                 martinM1Decoder = null
                 martinM2Decoder = null
@@ -76,7 +106,7 @@ class ImageDecoderRepository(
                 scottieS2Decoder = null
                 wefaxDecoder = null
                 activeDecoder = null
-                autoRearmPending = false
+                sstvRearmPending = false
 
                 _state.update {
                     if (imageReplacementProtection.active) {
@@ -116,7 +146,7 @@ class ImageDecoderRepository(
             scottieS2Decoder = null
             wefaxDecoder = null
             activeDecoder = null
-            autoRearmPending = false
+            sstvRearmPending = false
             activeSampleRateHz = null
 
             _state.update {
@@ -166,7 +196,11 @@ class ImageDecoderRepository(
         }
 
         synchronized(sessionLock) {
+            autosaveCurrentFrameLocked("NEW_LISTEN_SESSION")
             imageReplacementProtection.arm(current.image?.completedLines ?: 0)
+            pendingCaptureId = nextCaptureIdLocked()
+            currentCaptureId = 0L
+            lastCheckpointElapsedMs = 0L
             robot36Decoder = null
             martinM1Decoder = null
             martinM2Decoder = null
@@ -174,7 +208,7 @@ class ImageDecoderRepository(
             scottieS2Decoder = null
             wefaxDecoder = null
             activeDecoder = null
-            autoRearmPending = false
+            sstvRearmPending = false
             captureBuffer = null
             activeSampleRateHz = null
             diagnosticStarted = false
@@ -189,6 +223,7 @@ class ImageDecoderRepository(
                     sampleRateHz = null,
                     receivedSamples = 0L,
                     bufferedSamples = 0,
+                    recoveredCheckpoint = false,
                     error = null,
                 )
             } else {
@@ -202,6 +237,7 @@ class ImageDecoderRepository(
                     frequencyCorrectionHz = null,
                     decoderConfidence = 0,
                     image = null,
+                    recoveredCheckpoint = false,
                     error = null,
                 )
             }
@@ -237,7 +273,8 @@ class ImageDecoderRepository(
         microphoneSource.stop()
         synchronized(sessionLock) {
             finishActiveDecoderLocked("STOP_OR_LIFECYCLE")
-            autoRearmPending = false
+            autosaveCurrentFrameLocked("STOP_OR_LIFECYCLE")
+            sstvRearmPending = false
         }
         finishDiagnostics("STOP_OR_LIFECYCLE")
         _state.update { current ->
@@ -255,6 +292,7 @@ class ImageDecoderRepository(
     fun clearImage() {
         synchronized(sessionLock) {
             finishActiveDecoderLocked("CLEAR")
+            autosaveCurrentFrameLocked("CLEAR")
         }
         finishDiagnostics("CLEAR")
         synchronized(sessionLock) {
@@ -265,7 +303,7 @@ class ImageDecoderRepository(
             scottieS2Decoder = null
             wefaxDecoder = null
             activeDecoder = null
-            autoRearmPending = false
+            sstvRearmPending = false
             imageReplacementProtection.clear()
             captureBuffer?.clear()
             if (!state.value.listening) {
@@ -273,6 +311,8 @@ class ImageDecoderRepository(
                 activeSampleRateHz = null
             }
             frameRevision += 1
+            currentCaptureId = 0L
+            pendingCaptureId = if (state.value.listening) nextCaptureIdLocked() else null
         }
         _state.update { current ->
             current.copy(
@@ -285,6 +325,7 @@ class ImageDecoderRepository(
                 frequencyCorrectionHz = null,
                 decoderConfidence = 0,
                 image = null,
+                recoveredCheckpoint = false,
                 error = null,
             )
         }
@@ -368,12 +409,12 @@ class ImageDecoderRepository(
             ImageDecoderSelection.WEFAX -> wefaxDecoder?.process(samples, count)
         }
 
-        // A completed AUTO frame must remain visible and savable, but the decoder
+        // A completed SSTV frame must remain visible and savable, but the decoder
         // claim must not remain latched. Recreate all acquisition candidates only
         // after the callback stack returns so the next transmission can choose a
         // different VIS mode without CLEAR or leaving the IMG page.
-        if (autoRearmPending) {
-            rearmAutoDetectionLocked()
+        if (sstvRearmPending) {
+            rearmSstvDetectionLocked()
         }
     }
 
@@ -415,7 +456,7 @@ class ImageDecoderRepository(
         }
         activeSampleRateHz = sampleRateHz
         captureBuffer = PcmRingBuffer(sampleRateHz * SSTV_CAPTURE_SECONDS)
-        autoRearmPending = false
+        sstvRearmPending = false
         if (!diagnosticStarted) {
             diagnosticLogger.begin(
                 sampleRateHz = sampleRateHz,
@@ -518,46 +559,21 @@ class ImageDecoderRepository(
         ImageDecoderSelection.WEFAX -> wefaxDecoder != null
     }
 
-    private fun rearmAutoDetectionLocked() {
-        if (!autoRearmPending || state.value.decoder != ImageDecoderSelection.AUTO) {
-            autoRearmPending = false
+    private fun rearmSstvDetectionLocked() {
+        if (!sstvRearmPending || state.value.decoder == ImageDecoderSelection.WEFAX) {
+            sstvRearmPending = false
             return
         }
         val sampleRateHz = activeSampleRateHz ?: run {
-            autoRearmPending = false
+            sstvRearmPending = false
             return
         }
 
-        autoRearmPending = false
-        activeDecoder = null
-        robot36Decoder = Robot36Decoder(
-            sampleRateHz,
-            robot36Listener(),
-            false,
-        )
-        martinM1Decoder = MartinM1Decoder(
-            sampleRateHz,
-            martinM1Listener(),
-            false,
-        )
-        martinM2Decoder = MartinM2Decoder(
-            sampleRateHz,
-            martinM2Listener(),
-            false,
-        )
-        scottieS1Decoder = ScottieS1Decoder(
-            sampleRateHz,
-            scottieS1Listener(),
-            false,
-        )
-        scottieS2Decoder = ScottieS2Decoder(
-            sampleRateHz,
-            scottieS2Listener(),
-            false,
-        )
+        sstvRearmPending = false
         imageReplacementProtection.arm(state.value.image?.completedLines ?: 0)
+        installDecoderPipelineLocked(state.value.decoder, sampleRateHz)
         diagnosticLogger.decoder(
-            "AUTO rearmed after complete frame; retained displayed image and PCM buffer",
+            "${state.value.decoder.label} rearmed after complete frame; retained displayed image and PCM buffer",
         )
     }
 
@@ -855,10 +871,25 @@ class ImageDecoderRepository(
             override fun onDiagnostic(message: String) {
                 diagnosticLogger.decoder(message)
             }
+
+            override fun onPageStarted(reason: String) {
+                if (state.value.decoder != ImageDecoderSelection.WEFAX) return
+                beginWefaxPageLocked("WEFAX_$reason")
+            }
+
+            override fun onStopSignal(reason: String) {
+                if (state.value.decoder != ImageDecoderSelection.WEFAX) return
+                diagnosticLogger.decoder("WEFAX stop_signal reason=$reason LISTEN remains active")
+            }
         }
 
     private fun modeDetected(candidate: ActiveSstvDecoder, modeName: String) {
         if (!claimDecoder(candidate)) return
+        autosaveCurrentFrameLocked("NEW_VIS_HEADER")
+        imageReplacementProtection.arm(state.value.image?.completedLines ?: 0)
+        pendingCaptureId = nextCaptureIdLocked()
+        currentCaptureId = 0L
+        lastCheckpointElapsedMs = 0L
         if (imageReplacementProtection.active) {
             imageReplacementProtection.recordMode(modeName)
             return
@@ -867,6 +898,7 @@ class ImageDecoderRepository(
             current.copy(
                 signal = ImageSignalState.DECODING,
                 detectedMode = modeName,
+                recoveredCheckpoint = false,
                 error = null,
             )
         }
@@ -916,9 +948,14 @@ class ImageDecoderRepository(
                     "completed_lines=$completedLines",
             )
         }
-        if (complete && state.value.decoder == ImageDecoderSelection.AUTO) {
-            autoRearmPending = true
+        if (complete) {
+            sstvRearmPending = true
         }
+        val captureId = pendingCaptureId
+            ?: currentCaptureId.takeIf { it > 0L }
+            ?: nextCaptureIdLocked()
+        currentCaptureId = captureId
+        pendingCaptureId = null
         frameRevision += 1
         val frame = DecodedImageFrame(
             width = width,
@@ -926,6 +963,7 @@ class ImageDecoderRepository(
             argbPixels = argbPixels.copyOf(),
             completedLines = completedLines,
             revision = frameRevision,
+            captureId = captureId,
         )
         _state.update { current ->
             current.copy(
@@ -946,8 +984,13 @@ class ImageDecoderRepository(
                     current.decoderConfidence
                 },
                 image = frame,
+                recoveredCheckpoint = false,
                 error = null,
             )
+        }
+        checkpointCurrentFrameLocked(force = complete)
+        if (complete) {
+            autosaveCurrentFrameLocked("SSTV_COMPLETE")
         }
     }
 
@@ -966,6 +1009,11 @@ class ImageDecoderRepository(
                 "DISPLAY protected_image_replaced candidate=WEFAX completed_lines=$completedLines",
             )
         }
+        val captureId = pendingCaptureId
+            ?: currentCaptureId.takeIf { it > 0L }
+            ?: nextCaptureIdLocked()
+        currentCaptureId = captureId
+        pendingCaptureId = null
         frameRevision += 1
         val frame = DecodedImageFrame(
             width = width,
@@ -976,6 +1024,7 @@ class ImageDecoderRepository(
             completedLines = completedLines,
             revision = frameRevision,
             continuous = true,
+            captureId = captureId,
         )
         _state.update { current ->
             current.copy(
@@ -986,9 +1035,117 @@ class ImageDecoderRepository(
                 frequencyCorrectionHz = null,
                 decoderConfidence = 0,
                 image = frame,
+                recoveredCheckpoint = false,
                 error = null,
             )
         }
+        checkpointCurrentFrameLocked(force = complete)
+        if (complete) {
+            autosaveCurrentFrameLocked("WEFAX_COMPLETE")
+        }
+    }
+
+    private fun beginWefaxPageLocked(reason: String) {
+        autosaveCurrentFrameLocked(reason)
+        imageReplacementProtection.arm(state.value.image?.completedLines ?: 0)
+        pendingCaptureId = nextCaptureIdLocked()
+        currentCaptureId = 0L
+        lastCheckpointElapsedMs = 0L
+        diagnosticLogger.decoder(
+            "WEFAX page_rollover reason=$reason protected_image=${imageReplacementProtection.active}",
+        )
+    }
+
+    private fun nextCaptureIdLocked(): Long {
+        captureIdSequence += 1L
+        return captureIdSequence
+    }
+
+    private fun checkpointCurrentFrameLocked(force: Boolean) {
+        val frame = state.value.image ?: return
+        if (frame.completedLines <= 0 || frame.captureId <= 0L) return
+        val now = SystemClock.elapsedRealtime()
+        val intervalMs = if (!frame.continuous) {
+            SSTV_CHECKPOINT_INTERVAL_MS
+        } else when {
+            frame.completedLines < 500 -> WEFAX_CHECKPOINT_INTERVAL_MS
+            frame.completedLines < 1_500 -> WEFAX_LARGE_CHECKPOINT_INTERVAL_MS
+            else -> WEFAX_VERY_LARGE_CHECKPOINT_INTERVAL_MS
+        }
+        if (!force && now - lastCheckpointElapsedMs < intervalMs) return
+        val snapshot = snapshotCurrentFrameLocked() ?: return
+        lastCheckpointElapsedMs = now
+        captureStore.scheduleCheckpoint(snapshot)
+        diagnosticLogger.decoder(
+            "RECOVERY checkpoint_queued capture=${snapshot.captureId} lines=${snapshot.completedLines}",
+        )
+    }
+
+    private fun autosaveCurrentFrameLocked(reason: String) {
+        val snapshot = snapshotCurrentFrameLocked() ?: return
+        val captureId = snapshot.captureId
+        if (captureId in autosavedCaptureIds || captureId in autosavePendingCaptureIds) return
+        autosavePendingCaptureIds += captureId
+        captureStore.scheduleCheckpoint(snapshot)
+        captureStore.autosave(
+            snapshot = snapshot,
+            onSuccess = { result ->
+                synchronized(sessionLock) {
+                    autosavePendingCaptureIds -= result.captureId
+                    autosavedCaptureIds += result.captureId
+                    if (autosavedCaptureIds.size > 128) {
+                        autosavedCaptureIds.remove(autosavedCaptureIds.minOrNull())
+                    }
+                }
+                _state.update { current ->
+                    current.copy(
+                        lastAutosaveFileName = result.fileName,
+                        autosaveError = null,
+                    )
+                }
+                diagnosticLogger.decoder(
+                    "AUTOSAVE complete reason=$reason capture=${result.captureId} file=${result.fileName}",
+                )
+            },
+            onFailure = { failedCaptureId, failure ->
+                synchronized(sessionLock) {
+                    autosavePendingCaptureIds -= failedCaptureId
+                }
+                val message = failure.message ?: failure::class.java.simpleName
+                _state.update { current -> current.copy(autosaveError = message) }
+                diagnosticLogger.decoder(
+                    "AUTOSAVE failed reason=$reason capture=$failedCaptureId error=$message",
+                )
+            },
+        )
+        diagnosticLogger.decoder(
+            "AUTOSAVE queued reason=$reason capture=$captureId lines=${snapshot.completedLines}",
+        )
+    }
+
+    private fun snapshotCurrentFrameLocked(): ImageCaptureSnapshot? {
+        val current = state.value
+        val frame = current.image ?: return null
+        if (frame.completedLines <= 0 || frame.width <= 0 || frame.height <= 0) return null
+        val storedHeight = if (frame.continuous) {
+            frame.completedLines.coerceAtLeast(1)
+        } else {
+            frame.height
+        }
+        val pixelCountLong = frame.width.toLong() * storedHeight.toLong()
+        if (pixelCountLong <= 0L || pixelCountLong > frame.argbPixels.size.toLong()) return null
+        val pixelCount = pixelCountLong.toInt()
+        return ImageCaptureSnapshot(
+            captureId = frame.captureId.takeIf { it > 0L } ?: return null,
+            decoder = current.decoder,
+            detectedMode = current.detectedMode,
+            width = frame.width,
+            height = storedHeight,
+            completedLines = frame.completedLines.coerceIn(1, storedHeight),
+            continuous = frame.continuous,
+            complete = current.signal == ImageSignalState.COMPLETE,
+            argbPixels = frame.argbPixels.copyOf(pixelCount),
+        )
     }
 
     private fun writeTimeline(prefix: String, text: String) {
@@ -1030,6 +1187,11 @@ class ImageDecoderRepository(
 
     private fun handleAudioError(message: String) {
         microphoneSource.stop()
+        synchronized(sessionLock) {
+            finishActiveDecoderLocked("AUDIO_ERROR")
+            autosaveCurrentFrameLocked("AUDIO_ERROR")
+            sstvRearmPending = false
+        }
         finishDiagnostics("AUDIO_ERROR:$message")
         _state.update { current ->
             current.copy(
@@ -1067,5 +1229,9 @@ class ImageDecoderRepository(
         // Keep the existing session-local rolling capture in RAM only. This slice
         // performs no replay; live manual recovery starts with the next PCM block.
         const val SSTV_CAPTURE_SECONDS = 130
+        const val SSTV_CHECKPOINT_INTERVAL_MS = 4_000L
+        const val WEFAX_CHECKPOINT_INTERVAL_MS = 15_000L
+        const val WEFAX_LARGE_CHECKPOINT_INTERVAL_MS = 30_000L
+        const val WEFAX_VERY_LARGE_CHECKPOINT_INTERVAL_MS = 60_000L
     }
 }
