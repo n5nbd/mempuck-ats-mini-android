@@ -1,3 +1,15 @@
+## 0.36.0-dev.34 — IMG FIT/ZOOM and LISTEN screen-awake (2026-08-02)
+
+- Add single-tap FIT/ZOOM switching on the shared SSTV/WEFAX image surface.
+- FIT displays the entire currently received image; continuous WEFAX remains bottom-aligned as new lines arrive.
+- ZOOM centers a fixed 3× detail view on the tapped image point, supports drag panning, and preserves the selected source location and scale while additional WEFAX lines are received.
+- Show a brief theme-aware `FIT` or `ZOOM` overlay after each view-mode change.
+- Reserve double-tap for the later non-destructive correction editor, and leave FIT-mode drags unconsumed for future horizontal decoder-candidate replay.
+- Keep the Android screen awake only while an explicit IMG LISTEN session is active; restore the prior screen-awake state on STOP, page disposal, or session end.
+- Add deterministic viewport placement, tap-coordinate, pan-boundary, and growing-WEFAX hold-position tests.
+- Keep the development expiry at 2026-09-15 and identify the test build as `0.36.0-dev.34`, version code 73.
+- Preserve the hardware-tested dev.33r2 WEFAX decoder, all SSTV decoders, SAVE/SHARE output, and completed-image replacement protection unchanged.
+
 ## 0.36.0-dev.33r2 — WEFAX robust clock correction (2026-08-02)
 
 - Replace first/last phasing-span averaging with a robust fit across every accepted phasing edge, reducing sensitivity to noisy endpoint edges and preserving the leading-white line origin.

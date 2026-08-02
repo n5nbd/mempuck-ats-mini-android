@@ -7,8 +7,10 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,19 +27,28 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
 import androidx.core.content.FileProvider
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.n5nbd.mempuck.atsmini.img.model.DecodedImageFrame
@@ -50,6 +61,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 private val ImagePanelShape = RoundedCornerShape(5.dp)
 
@@ -82,6 +95,17 @@ fun ImageDecoderScreen(
 ) {
     DisposableEffect(Unit) {
         onDispose(onStop)
+    }
+
+    val view = LocalView.current
+    DisposableEffect(view, state.listening) {
+        val previousKeepScreenOn = view.keepScreenOn
+        if (state.listening) {
+            view.keepScreenOn = true
+        }
+        onDispose {
+            view.keepScreenOn = previousKeepScreenOn
+        }
     }
 
     val context = LocalContext.current
@@ -146,22 +170,14 @@ fun ImageDecoderScreen(
                         monochromePreview(frame, palette)
                     }
                 }
-                Image(
-                    bitmap = preview.asImageBitmap(),
+                DecodedImageViewport(
+                    preview = preview,
+                    frame = frame,
+                    palette = palette,
                     contentDescription = state.detectedMode ?: "Decoded image",
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(2.dp),
-                    contentScale = if (frame.continuous) {
-                        ContentScale.FillWidth
-                    } else {
-                        ContentScale.Fit
-                    },
-                    alignment = if (frame.continuous) {
-                        Alignment.BottomCenter
-                    } else {
-                        Alignment.Center
-                    },
                 )
             }
         }
@@ -299,6 +315,220 @@ fun ImageDecoderScreen(
                     fontFamily = FontFamily.Monospace,
                     fontSize = 11.sp,
                     lineHeight = 14.sp,
+                )
+            }
+        }
+    }
+}
+
+
+private enum class ImageViewMode {
+    FIT,
+    ZOOM,
+}
+
+private const val DetailZoomMultiplier = 3f
+private const val ViewModeOverlayMillis = 850L
+
+@Composable
+private fun DecodedImageViewport(
+    preview: Bitmap,
+    frame: DecodedImageFrame,
+    palette: ImageDecoderPalette,
+    contentDescription: String,
+    modifier: Modifier = Modifier,
+) {
+    val image = remember(preview) { preview.asImageBitmap() }
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var viewMode by remember { mutableStateOf(ImageViewMode.FIT) }
+    var zoomCenter by remember { mutableStateOf<ImagePoint?>(null) }
+    var detailScale by remember { mutableStateOf<Float?>(null) }
+    var overlayLabel by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(overlayLabel) {
+        val shown = overlayLabel ?: return@LaunchedEffect
+        delay(ViewModeOverlayMillis)
+        if (overlayLabel == shown) {
+            overlayLabel = null
+        }
+    }
+
+    val viewportWidth = viewportSize.width.toFloat()
+    val viewportHeight = viewportSize.height.toFloat()
+    val imageWidth = preview.width
+    val imageHeight = preview.height
+    val placement = if (viewportSize != IntSize.Zero) {
+        fitPlacement(
+            viewportWidth = viewportWidth,
+            viewportHeight = viewportHeight,
+            imageWidth = imageWidth,
+            imageHeight = imageHeight,
+            bottomAligned = frame.continuous,
+        )
+    } else {
+        null
+    }
+    val zoomScale = detailScale
+        ?: placement?.scale?.times(DetailZoomMultiplier)
+        ?: 1f
+
+    val tapModifier = Modifier.pointerInput(
+        viewMode,
+        viewportSize,
+        imageWidth,
+        imageHeight,
+        frame.continuous,
+    ) {
+        detectTapGestures(
+            // Reserved for the completed-image correction editor in a later slice.
+            onDoubleTap = { },
+            onTap = { tap ->
+                val currentPlacement = placement
+                if (currentPlacement != null && viewMode == ImageViewMode.FIT) {
+                    val selectedScale = currentPlacement.scale * DetailZoomMultiplier
+                    detailScale = selectedScale
+                    val requested = imagePointAt(
+                        tapX = tap.x,
+                        tapY = tap.y,
+                        placement = currentPlacement,
+                        imageWidth = imageWidth,
+                        imageHeight = imageHeight,
+                    )
+                    zoomCenter = clampZoomCenter(
+                        requested = requested,
+                        viewportWidth = viewportWidth,
+                        viewportHeight = viewportHeight,
+                        imageWidth = imageWidth,
+                        imageHeight = imageHeight,
+                        scale = selectedScale,
+                    )
+                    viewMode = ImageViewMode.ZOOM
+                    overlayLabel = "ZOOM"
+                } else if (viewMode == ImageViewMode.ZOOM) {
+                    viewMode = ImageViewMode.FIT
+                    detailScale = null
+                    overlayLabel = "FIT"
+                }
+            },
+        )
+    }
+
+    val panModifier = if (viewMode == ImageViewMode.ZOOM) {
+        Modifier.pointerInput(
+            viewportSize,
+            imageWidth,
+            imageHeight,
+            zoomScale,
+        ) {
+            detectDragGestures { change, dragAmount ->
+                change.consume()
+                val current = zoomCenter ?: ImagePoint(
+                    imageWidth / 2f,
+                    imageHeight / 2f,
+                )
+                zoomCenter = clampZoomCenter(
+                    requested = ImagePoint(
+                        x = current.x - dragAmount.x / zoomScale,
+                        y = current.y - dragAmount.y / zoomScale,
+                    ),
+                    viewportWidth = viewportWidth,
+                    viewportHeight = viewportHeight,
+                    imageWidth = imageWidth,
+                    imageHeight = imageHeight,
+                    scale = zoomScale,
+                )
+            }
+        }
+    } else {
+        // FIT deliberately leaves drags unconsumed so horizontal decoder-candidate
+        // replay can own that gesture when buffered replay is implemented.
+        Modifier
+    }
+
+    Box(modifier = modifier) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged { viewportSize = it }
+                .then(tapModifier)
+                .then(panModifier),
+        ) {
+            drawRect(palette.background)
+            val currentPlacement = placement ?: return@Canvas
+            if (viewMode == ImageViewMode.FIT) {
+                drawImage(
+                    image = image,
+                    srcOffset = IntOffset.Zero,
+                    srcSize = IntSize(image.width, image.height),
+                    dstOffset = IntOffset(
+                        currentPlacement.left.roundToInt(),
+                        currentPlacement.top.roundToInt(),
+                    ),
+                    dstSize = IntSize(
+                        currentPlacement.width.roundToInt().coerceAtLeast(1),
+                        currentPlacement.height.roundToInt().coerceAtLeast(1),
+                    ),
+                    filterQuality = FilterQuality.Medium,
+                )
+            } else {
+                val requestedCenter = zoomCenter ?: ImagePoint(
+                    imageWidth / 2f,
+                    imageHeight / 2f,
+                )
+                val effectiveCenter = clampZoomCenter(
+                    requested = requestedCenter,
+                    viewportWidth = size.width,
+                    viewportHeight = size.height,
+                    imageWidth = imageWidth,
+                    imageHeight = imageHeight,
+                    scale = zoomScale,
+                )
+                val topLeft = zoomTopLeft(
+                    center = effectiveCenter,
+                    viewportWidth = size.width,
+                    viewportHeight = size.height,
+                    scale = zoomScale,
+                )
+                drawImage(
+                    image = image,
+                    srcOffset = IntOffset.Zero,
+                    srcSize = IntSize(image.width, image.height),
+                    dstOffset = IntOffset(
+                        topLeft.x.roundToInt(),
+                        topLeft.y.roundToInt(),
+                    ),
+                    dstSize = IntSize(
+                        (imageWidth * zoomScale).roundToInt().coerceAtLeast(1),
+                        (imageHeight * zoomScale).roundToInt().coerceAtLeast(1),
+                    ),
+                    filterQuality = FilterQuality.Medium,
+                )
+            }
+        }
+
+        // Semantics remain on the shared viewport even though Canvas draws the bitmap.
+        Text(
+            text = contentDescription,
+            modifier = Modifier.alpha(0f),
+        )
+
+        overlayLabel?.let { label ->
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(7.dp),
+                color = palette.selectedBackground,
+                contentColor = palette.selectedForeground,
+                border = BorderStroke(1.dp, palette.foreground),
+                shape = ImagePanelShape,
+            ) {
+                Text(
+                    text = label,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 0.7.sp,
                 )
             }
         }

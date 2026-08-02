@@ -32,6 +32,15 @@ Image actions:
 CLEAR   SAVE   SHARE
 ```
 
+Image-surface gestures:
+
+- Single tap toggles FIT and a fixed detail ZOOM centered on the tapped image point.
+- FIT shows the complete currently received image and bottom-aligns a growing WEFAX image.
+- ZOOM supports drag panning and holds the selected source location while new WEFAX lines arrive.
+- Double-tap is reserved for a later non-destructive skew/offset/brightness/contrast editor.
+- Horizontal FIT-mode swipes remain available for later buffered decoder-candidate replay.
+- Keep the screen awake only while the user-started LISTEN session is active.
+
 The status line should remain compact and show the selected input, decoder state, detected mode when available, and errors that require user action.
 
 ## Initial Decoder Scope
@@ -111,9 +120,10 @@ Keep this subsystem independent from the BLE radio repository. Image decoding mu
 2. Import the Robot36 decoder engine with license and attribution documentation.
 3. Decode SSTV automatically from the phone microphone and render progressively.
 4. Add manual IOC 576 / 120 LPM WEFAX into the same image surface. **Implemented in dev.33, phase-acquired in dev.33r1, and robustly clock-corrected in dev.33r2.**
-5. Add USB audio device selection and routing.
-6. Add CLEAR, SAVE, and SHARE.
-7. Add lifecycle hardening, diagnostics, and hardware acceptance tests.
+5. Add FIT/ZOOM/pan and keep the screen awake during LISTEN. **Implemented in dev.34.**
+6. Add USB audio device selection and routing.
+7. Add CLEAR, SAVE, and SHARE.
+8. Add lifecycle hardening, diagnostics, and hardware acceptance tests.
 
 Each slice should build and run on the Pixel 6 before proceeding.
 
