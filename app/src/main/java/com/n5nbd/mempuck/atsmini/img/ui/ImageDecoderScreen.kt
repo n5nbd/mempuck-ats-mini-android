@@ -120,6 +120,9 @@ fun ImageDecoderScreen(
     var correctionEditorOpen by remember {
         mutableStateOf(false)
     }
+    var releasedFrameRevision by remember {
+        mutableStateOf<Long?>(null)
+    }
     val imagePicker = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument(),
     ) { uri ->
@@ -155,6 +158,15 @@ fun ImageDecoderScreen(
             (state.signal == ImageSignalState.COMPLETE &&
                 (frame.continuous || frame.completedLines >= frame.height))
     }
+    LaunchedEffect(state.image?.revision) {
+        releasedFrameRevision = null
+    }
+    val decoderSelectionLocked = shouldLockDecoderSelection(
+        signal = state.signal,
+        receiverFrameRevision = state.image?.revision,
+        openedImageActive = openedFrame != null,
+        releasedFrameRevision = releasedFrameRevision,
+    )
 
     ImagePanel(palette = palette) {
         Text(
@@ -258,11 +270,24 @@ fun ImageDecoderScreen(
                     text = decoder.label,
                     selected = state.decoder == decoder,
                     palette = palette,
-                    enabled = true,
+                    enabled = !decoderSelectionLocked,
                     onClick = { onSelectDecoder(decoder) },
                     modifier = Modifier.weight(1f),
                 )
             }
+        }
+
+        if (decoderSelectionLocked) {
+            Spacer(Modifier.height(4.dp))
+            Text(
+                text = "IMAGE LOCKED • SAVE, CLEAR, OR NEW LISTEN",
+                modifier = Modifier.fillMaxWidth(),
+                color = palette.muted,
+                textAlign = TextAlign.Center,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 10.sp,
+                fontWeight = FontWeight.Bold,
+            )
         }
 
         Spacer(Modifier.height(8.dp))
@@ -294,6 +319,7 @@ fun ImageDecoderScreen(
                 onStop
             } else {
                 {
+                    releasedFrameRevision = state.image?.revision
                     openedFrame = null
                     correctionEditorOpen = false
                     onListen()
@@ -331,7 +357,9 @@ fun ImageDecoderScreen(
                 enabled = savableFrame != null,
                 onClick = {
                     savableFrame?.let { frame ->
-                        saveCompletedImage(context, colorImage(frame))
+                        if (saveCompletedImage(context, colorImage(frame)) && openedFrame == null) {
+                            releasedFrameRevision = state.image?.revision
+                        }
                     }
                 },
                 modifier = Modifier.weight(1f),
@@ -639,7 +667,7 @@ private fun ImageCorrectionDialog(
             monochromePreview(correctedPreviewFrame, palette)
         }
     }
-    val skewLimit = (frame.width * 0.30f).coerceIn(20f, 400f)
+    val skewLimit = expandedSkewLimit(frame.width)
     val offsetLimit = (frame.width / 2f).coerceAtLeast(1f)
 
     Dialog(onDismissRequest = onCancel) {
@@ -675,13 +703,11 @@ private fun ImageCorrectionDialog(
 
                 Spacer(Modifier.height(6.dp))
 
-                ImageCorrectionSlider(
-                    label = "SKEW",
-                    valueText = "${draft.skewPixels.roundToInt()} px",
-                    value = draft.skewPixels,
-                    valueRange = -skewLimit..skewLimit,
+                SkewCorrectionSlider(
+                    skewPixels = draft.skewPixels,
+                    skewLimit = skewLimit,
                     palette = palette,
-                    onValueChange = { value ->
+                    onSkewChange = { value ->
                         draft = draft.copy(skewPixels = value.roundToInt().toFloat())
                     },
                 )
@@ -786,6 +812,26 @@ private fun CorrectionPreview(
             filterQuality = FilterQuality.Medium,
         )
     }
+}
+
+@Composable
+private fun SkewCorrectionSlider(
+    skewPixels: Float,
+    skewLimit: Float,
+    palette: ImageDecoderPalette,
+    onSkewChange: (Float) -> Unit,
+) {
+    val sliderPosition = skewToSliderPosition(skewPixels, skewLimit)
+    ImageCorrectionSlider(
+        label = "SKEW",
+        valueText = "${skewPixels.roundToInt()} px",
+        value = sliderPosition,
+        valueRange = -1f..1f,
+        palette = palette,
+        onValueChange = { position ->
+            onSkewChange(sliderPositionToSkew(position, skewLimit))
+        },
+    )
 }
 
 @Composable
@@ -961,8 +1007,8 @@ private val ImageTimestampFormat = DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"
 private fun imageFileName(): String =
     "MemPuck-IMG-${LocalDateTime.now().format(ImageTimestampFormat)}.png"
 
-private fun saveCompletedImage(context: android.content.Context, bitmap: Bitmap) {
-    runCatching {
+private fun saveCompletedImage(context: android.content.Context, bitmap: Bitmap): Boolean {
+    val result = runCatching {
         val values = ContentValues().apply {
             put(MediaStore.Images.Media.DISPLAY_NAME, imageFileName())
             put(MediaStore.Images.Media.MIME_TYPE, "image/png")
@@ -996,6 +1042,7 @@ private fun saveCompletedImage(context: android.content.Context, bitmap: Bitmap)
             Toast.LENGTH_LONG,
         ).show()
     }
+    return result.isSuccess
 }
 
 private fun loadPickedImage(

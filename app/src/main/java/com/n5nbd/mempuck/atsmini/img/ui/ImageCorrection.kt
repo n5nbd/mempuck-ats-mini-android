@@ -1,8 +1,11 @@
 package com.n5nbd.mempuck.atsmini.img.ui
 
 import com.n5nbd.mempuck.atsmini.img.model.DecodedImageFrame
+import kotlin.math.abs
 import kotlin.math.min
+import kotlin.math.pow
 import kotlin.math.roundToInt
+import kotlin.math.sign
 
 data class ImageCorrection(
     val skewPixels: Float = 0f,
@@ -20,6 +23,22 @@ data class ImageCorrection(
         skewPixels = skewPixels * horizontalScale,
         offsetPixels = offsetPixels * horizontalScale,
     )
+}
+
+
+internal fun expandedSkewLimit(imageWidth: Int): Float =
+    (imageWidth.coerceAtLeast(1) * 16f).coerceIn(400f, 250_000f)
+
+internal fun skewToSliderPosition(skewPixels: Float, skewLimit: Float): Float {
+    require(skewLimit > 0f)
+    val normalized = (abs(skewPixels).coerceAtMost(skewLimit) / skewLimit).pow(1f / 3f)
+    return normalized * skewPixels.sign
+}
+
+internal fun sliderPositionToSkew(position: Float, skewLimit: Float): Float {
+    require(skewLimit > 0f)
+    val bounded = position.coerceIn(-1f, 1f)
+    return bounded.sign * abs(bounded).pow(3f) * skewLimit
 }
 
 internal fun applyImageCorrection(

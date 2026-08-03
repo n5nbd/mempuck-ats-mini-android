@@ -1082,6 +1082,14 @@ class ImageDecoderRepository(
     }
 
     private fun autosaveCurrentFrameLocked(reason: String) {
+        val frame = state.value.image ?: return
+        if (!shouldAutosaveFrame(frame)) {
+            diagnosticLogger.decoder(
+                "AUTOSAVE discarded reason=$reason capture=${frame.captureId} " +
+                    "lines=${frame.completedLines} minimum=$MinimumWefaxAutosaveLines",
+            )
+            return
+        }
         val snapshot = snapshotCurrentFrameLocked() ?: return
         val captureId = snapshot.captureId
         if (captureId in autosavedCaptureIds || captureId in autosavePendingCaptureIds) return

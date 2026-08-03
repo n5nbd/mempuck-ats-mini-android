@@ -139,4 +139,18 @@ class ImageCorrectionTest {
         const val green = 0xff00ff00.toInt()
         const val blue = 0xff0000ff.toInt()
     }
+    @Test
+    fun expandedSkewRangeReachesSixteenImageWidths() {
+        assertEquals(28_944f, expandedSkewLimit(1_809), 0.01f)
+    }
+
+    @Test
+    fun nonlinearSkewSliderRoundTripsLargeAndFineValues() {
+        val limit = expandedSkewLimit(1_809)
+        for (value in listOf(-25_000f, -400f, -10f, 0f, 10f, 400f, 25_000f)) {
+            val position = skewToSliderPosition(value, limit)
+            assertEquals(value, sliderPositionToSkew(position, limit), 0.1f)
+        }
+    }
+
 }

@@ -1,3 +1,13 @@
+## 0.36.0-dev.38 — WEFAX strip filtering and completed-image lock (2026-08-02)
+
+- Keep the hardware-proven dev.37 WEFAX timing release, unattended autosave, and saved-image OPEN workflow unchanged.
+- Treat continuous WEFAX captures under 50 decoded lines as false restart debris and do not place them in the gallery; 50 lines and above remain eligible for autosave.
+- Expand correction-editor SKEW from the former 400-pixel ceiling to as much as 16 full image widths, with a nonlinear slider that preserves fine control near zero while reaching severe field-recovery offsets.
+- Disable decoder mode buttons while a completed receiver image is still protected, preventing an accidental mode tap from replacing it.
+- Release the mode-button lock only after a successful manual SAVE, CLEAR, or a deliberate new LISTEN session; unattended next-image acquisition remains unaffected.
+- Add policy and correction-mapping regression tests for the 50-line WEFAX boundary, expanded skew range, and completed-image lock.
+- Keep the development expiry at 2026-09-15 and identify the test build as `0.36.0-dev.38`, version code 77.
+
 ## 0.36.0-dev.37 — WEFAX rollover timing release and saved-image OPEN (2026-08-02)
 
 - Keep the proven dev.36 unattended SSTV and WEFAX autosave pipeline unchanged.
