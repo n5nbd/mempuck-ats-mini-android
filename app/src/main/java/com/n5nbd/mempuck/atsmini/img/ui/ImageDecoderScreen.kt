@@ -7,8 +7,10 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -21,25 +23,36 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.core.content.FileProvider
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
 import com.n5nbd.mempuck.atsmini.img.model.DecodedImageFrame
 import com.n5nbd.mempuck.atsmini.img.model.ImageAudioInput
 import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderSelection
@@ -50,6 +63,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.time.LocalDateTime
 import java.time.format.DateTimeFormatter
+import kotlin.math.roundToInt
+import kotlinx.coroutines.delay
 
 private val ImagePanelShape = RoundedCornerShape(5.dp)
 
@@ -85,10 +100,30 @@ fun ImageDecoderScreen(
     }
 
     val context = LocalContext.current
-    val savableFrame = state.image?.takeIf { frame ->
+    val sourceFrame = state.image
+    var acceptedCorrection by remember(sourceFrame?.revision) {
+        mutableStateOf(ImageCorrection())
+    }
+    var correctionEditorOpen by remember {
+        mutableStateOf(false)
+    }
+
+    LaunchedEffect(state.listening) {
+        if (state.listening) {
+            correctionEditorOpen = false
+        }
+    }
+
+    val workingFrame = remember(sourceFrame?.revision, acceptedCorrection) {
+        sourceFrame?.let { frame -> applyImageCorrection(frame, acceptedCorrection) }
+    }
+    val savableFrame = workingFrame?.takeIf { frame ->
         frame.completedLines > 0
     }
-    val completedFrame = state.image?.takeIf { frame ->
+    val completedSourceFrame = sourceFrame?.takeIf { frame ->
+        state.signal == ImageSignalState.COMPLETE && frame.complete
+    }
+    val completedFrame = workingFrame?.takeIf { frame ->
         state.signal == ImageSignalState.COMPLETE && frame.complete
     }
 
@@ -111,7 +146,7 @@ fun ImageDecoderScreen(
             border = BorderStroke(1.dp, palette.foreground),
             shape = ImagePanelShape,
         ) {
-            val frame = state.image
+            val frame = workingFrame
             if (frame == null) {
                 Box(contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -134,7 +169,7 @@ fun ImageDecoderScreen(
                 }
             } else {
                 val preview = remember(
-                    frame.revision,
+                    frame,
                     sourceColorPreview,
                     palette.background,
                     palette.foreground,
@@ -145,21 +180,20 @@ fun ImageDecoderScreen(
                         monochromePreview(frame, palette)
                     }
                 }
-                Image(
-                    bitmap = preview.asImageBitmap(),
+                DecodedImageViewport(
+                    preview = preview,
+                    palette = palette,
                     contentDescription = state.detectedMode ?: "Decoded image",
+                    topAlignedInFit = state.signal == ImageSignalState.DECODING &&
+                        state.decoder == ImageDecoderSelection.WEFAX,
+                    onDoubleTap = if (completedSourceFrame != null && !state.listening) {
+                        { correctionEditorOpen = true }
+                    } else {
+                        null
+                    },
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(2.dp),
-                    alignment = if (
-                        state.signal == ImageSignalState.DECODING &&
-                        state.decoder == ImageDecoderSelection.WEFAX
-                    ) {
-                        Alignment.TopCenter
-                    } else {
-                        Alignment.Center
-                    },
-                    contentScale = ContentScale.Fit,
                 )
             }
         }
@@ -305,6 +339,426 @@ fun ImageDecoderScreen(
             }
         }
     }
+
+    if (correctionEditorOpen && completedSourceFrame != null && !state.listening) {
+        ImageCorrectionDialog(
+            frame = completedSourceFrame,
+            initialCorrection = acceptedCorrection,
+            sourceColorPreview = sourceColorPreview,
+            palette = palette,
+            onCancel = { correctionEditorOpen = false },
+            onAccept = { correction ->
+                acceptedCorrection = correction
+                correctionEditorOpen = false
+            },
+        )
+    }
+}
+
+private enum class ImageViewMode {
+    FIT,
+    ZOOM,
+}
+
+private const val DetailZoomMultiplier = 3f
+private const val ViewModeOverlayMillis = 850L
+
+@Composable
+private fun DecodedImageViewport(
+    preview: Bitmap,
+    palette: ImageDecoderPalette,
+    contentDescription: String,
+    topAlignedInFit: Boolean,
+    onDoubleTap: (() -> Unit)? = null,
+    modifier: Modifier = Modifier,
+) {
+    val image = remember(preview) { preview.asImageBitmap() }
+    var viewportSize by remember { mutableStateOf(IntSize.Zero) }
+    var viewMode by remember { mutableStateOf(ImageViewMode.FIT) }
+    var zoomCenter by remember { mutableStateOf<ImagePoint?>(null) }
+    var detailScale by remember { mutableStateOf<Float?>(null) }
+    var overlayLabel by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(overlayLabel) {
+        val shown = overlayLabel ?: return@LaunchedEffect
+        delay(ViewModeOverlayMillis)
+        if (overlayLabel == shown) overlayLabel = null
+    }
+
+    val viewportWidth = viewportSize.width.toFloat()
+    val viewportHeight = viewportSize.height.toFloat()
+    val imageWidth = preview.width
+    val imageHeight = preview.height
+    val placement = if (viewportSize != IntSize.Zero) {
+        fitPlacement(
+            viewportWidth = viewportWidth,
+            viewportHeight = viewportHeight,
+            imageWidth = imageWidth,
+            imageHeight = imageHeight,
+            topAligned = topAlignedInFit,
+        )
+    } else {
+        null
+    }
+    val zoomScale = detailScale
+        ?: placement?.scale?.times(DetailZoomMultiplier)
+        ?: 1f
+
+    val tapModifier = Modifier.pointerInput(
+        viewMode,
+        viewportSize,
+        imageWidth,
+        imageHeight,
+        topAlignedInFit,
+        onDoubleTap,
+    ) {
+        detectTapGestures(
+            onDoubleTap = onDoubleTap?.let { callback -> { _ -> callback() } },
+            onTap = { tap ->
+                val currentPlacement = placement
+                if (currentPlacement != null && viewMode == ImageViewMode.FIT) {
+                    val selectedScale = currentPlacement.scale * DetailZoomMultiplier
+                    detailScale = selectedScale
+                    val requested = imagePointAt(
+                        tapX = tap.x,
+                        tapY = tap.y,
+                        placement = currentPlacement,
+                        imageWidth = imageWidth,
+                        imageHeight = imageHeight,
+                    )
+                    zoomCenter = clampZoomCenter(
+                        requested = requested,
+                        viewportWidth = viewportWidth,
+                        viewportHeight = viewportHeight,
+                        imageWidth = imageWidth,
+                        imageHeight = imageHeight,
+                        scale = selectedScale,
+                    )
+                    viewMode = ImageViewMode.ZOOM
+                    overlayLabel = "ZOOM"
+                } else if (viewMode == ImageViewMode.ZOOM) {
+                    viewMode = ImageViewMode.FIT
+                    detailScale = null
+                    overlayLabel = "FIT"
+                }
+            },
+        )
+    }
+
+    val panModifier = if (viewMode == ImageViewMode.ZOOM) {
+        Modifier.pointerInput(viewportSize, imageWidth, imageHeight, zoomScale) {
+            detectDragGestures { change, dragAmount ->
+                change.consume()
+                val current = zoomCenter ?: ImagePoint(imageWidth / 2f, imageHeight / 2f)
+                zoomCenter = clampZoomCenter(
+                    requested = ImagePoint(
+                        x = current.x - dragAmount.x / zoomScale,
+                        y = current.y - dragAmount.y / zoomScale,
+                    ),
+                    viewportWidth = viewportWidth,
+                    viewportHeight = viewportHeight,
+                    imageWidth = imageWidth,
+                    imageHeight = imageHeight,
+                    scale = zoomScale,
+                )
+            }
+        }
+    } else {
+        Modifier
+    }
+
+    Box(modifier = modifier) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged { viewportSize = it }
+                .then(tapModifier)
+                .then(panModifier),
+        ) {
+            drawRect(palette.background)
+            val currentPlacement = placement ?: return@Canvas
+            if (viewMode == ImageViewMode.FIT) {
+                drawImage(
+                    image = image,
+                    srcOffset = IntOffset.Zero,
+                    srcSize = IntSize(image.width, image.height),
+                    dstOffset = IntOffset(
+                        currentPlacement.left.roundToInt(),
+                        currentPlacement.top.roundToInt(),
+                    ),
+                    dstSize = IntSize(
+                        currentPlacement.width.roundToInt().coerceAtLeast(1),
+                        currentPlacement.height.roundToInt().coerceAtLeast(1),
+                    ),
+                    filterQuality = FilterQuality.Medium,
+                )
+            } else {
+                val requestedCenter = zoomCenter ?: ImagePoint(imageWidth / 2f, imageHeight / 2f)
+                val effectiveCenter = clampZoomCenter(
+                    requested = requestedCenter,
+                    viewportWidth = size.width,
+                    viewportHeight = size.height,
+                    imageWidth = imageWidth,
+                    imageHeight = imageHeight,
+                    scale = zoomScale,
+                )
+                val topLeft = zoomTopLeft(
+                    center = effectiveCenter,
+                    viewportWidth = size.width,
+                    viewportHeight = size.height,
+                    scale = zoomScale,
+                )
+                drawImage(
+                    image = image,
+                    srcOffset = IntOffset.Zero,
+                    srcSize = IntSize(image.width, image.height),
+                    dstOffset = IntOffset(topLeft.x.roundToInt(), topLeft.y.roundToInt()),
+                    dstSize = IntSize(
+                        (imageWidth * zoomScale).roundToInt().coerceAtLeast(1),
+                        (imageHeight * zoomScale).roundToInt().coerceAtLeast(1),
+                    ),
+                    filterQuality = FilterQuality.Medium,
+                )
+            }
+        }
+
+        Text(text = contentDescription, modifier = Modifier.alpha(0f))
+
+        overlayLabel?.let { label ->
+            Surface(
+                modifier = Modifier.align(Alignment.TopEnd).padding(7.dp),
+                color = palette.selectedBackground,
+                contentColor = palette.selectedForeground,
+                border = BorderStroke(1.dp, palette.foreground),
+                shape = ImagePanelShape,
+            ) {
+                Text(
+                    text = label,
+                    modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp),
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 0.7.sp,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun ImageCorrectionDialog(
+    frame: DecodedImageFrame,
+    initialCorrection: ImageCorrection,
+    sourceColorPreview: Boolean,
+    palette: ImageDecoderPalette,
+    onCancel: () -> Unit,
+    onAccept: (ImageCorrection) -> Unit,
+) {
+    var draft by remember(frame.revision, initialCorrection) {
+        mutableStateOf(initialCorrection)
+    }
+    val (previewFrame, previewScale) = remember(frame.revision) {
+        correctionPreviewFrame(frame)
+    }
+    val correctedPreviewFrame = remember(previewFrame, previewScale, draft) {
+        applyImageCorrection(previewFrame, draft.scaled(previewScale))
+    }
+    val previewBitmap = remember(
+        correctedPreviewFrame,
+        sourceColorPreview,
+        palette.background,
+        palette.foreground,
+    ) {
+        if (sourceColorPreview) {
+            colorImage(correctedPreviewFrame, palette.background.toArgb())
+        } else {
+            monochromePreview(correctedPreviewFrame, palette)
+        }
+    }
+    val skewLimit = skewControlLimit(frame.width)
+    val offsetLimit = (frame.width / 2f).coerceAtLeast(1f)
+
+    Dialog(onDismissRequest = onCancel) {
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = palette.background,
+            contentColor = palette.foreground,
+            border = BorderStroke(1.dp, palette.foreground),
+            shape = ImagePanelShape,
+        ) {
+            Column(modifier = Modifier.padding(12.dp)) {
+                Text(
+                    text = "IMAGE CORRECTION",
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = TextAlign.Center,
+                    fontFamily = FontFamily.Monospace,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
+                    letterSpacing = 1.sp,
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                CorrectionPreview(
+                    bitmap = previewBitmap,
+                    palette = palette,
+                    modifier = Modifier.fillMaxWidth().height(170.dp),
+                )
+
+                Spacer(Modifier.height(6.dp))
+
+                ImageCorrectionSlider(
+                    label = "SKEW",
+                    valueText = "${draft.skewPixels.roundToInt()} px",
+                    value = draft.skewPixels,
+                    valueRange = -skewLimit..skewLimit,
+                    palette = palette,
+                    onValueChange = { value ->
+                        draft = draft.copy(skewPixels = value.roundToInt().toFloat())
+                    },
+                )
+                ImageCorrectionSlider(
+                    label = "OFFSET",
+                    valueText = "${draft.offsetPixels.roundToInt()} px",
+                    value = draft.offsetPixels,
+                    valueRange = -offsetLimit..offsetLimit,
+                    palette = palette,
+                    onValueChange = { value ->
+                        draft = draft.copy(offsetPixels = value.roundToInt().toFloat())
+                    },
+                )
+                ImageCorrectionSlider(
+                    label = "BRIGHT",
+                    valueText = signedValue(draft.brightness),
+                    value = draft.brightness,
+                    valueRange = -100f..100f,
+                    palette = palette,
+                    onValueChange = { value ->
+                        draft = draft.copy(brightness = value.roundToInt().toFloat())
+                    },
+                )
+                ImageCorrectionSlider(
+                    label = "CONTRAST",
+                    valueText = signedValue(draft.contrast),
+                    value = draft.contrast,
+                    valueRange = -80f..100f,
+                    palette = palette,
+                    onValueChange = { value ->
+                        draft = draft.copy(contrast = value.roundToInt().toFloat())
+                    },
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    ImageButton(
+                        text = "RESET",
+                        selected = false,
+                        palette = palette,
+                        enabled = !draft.neutral,
+                        onClick = { draft = ImageCorrection() },
+                        modifier = Modifier.weight(1f),
+                    )
+                    ImageButton(
+                        text = "CANCEL",
+                        selected = false,
+                        palette = palette,
+                        enabled = true,
+                        onClick = onCancel,
+                        modifier = Modifier.weight(1f),
+                    )
+                    ImageButton(
+                        text = "OK",
+                        selected = true,
+                        palette = palette,
+                        enabled = true,
+                        onClick = { onAccept(draft) },
+                        modifier = Modifier.weight(1f),
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CorrectionPreview(
+    bitmap: Bitmap,
+    palette: ImageDecoderPalette,
+    modifier: Modifier = Modifier,
+) {
+    val image = remember(bitmap) { bitmap.asImageBitmap() }
+    Canvas(
+        modifier = modifier.background(palette.background).border(1.dp, palette.foreground),
+    ) {
+        val placement = fitPlacement(
+            viewportWidth = size.width,
+            viewportHeight = size.height,
+            imageWidth = bitmap.width,
+            imageHeight = bitmap.height,
+            topAligned = false,
+        )
+        drawImage(
+            image = image,
+            srcOffset = IntOffset.Zero,
+            srcSize = IntSize(image.width, image.height),
+            dstOffset = IntOffset(
+                placement.left.roundToInt(),
+                placement.top.roundToInt(),
+            ),
+            dstSize = IntSize(
+                placement.width.roundToInt().coerceAtLeast(1),
+                placement.height.roundToInt().coerceAtLeast(1),
+            ),
+            filterQuality = FilterQuality.Medium,
+        )
+    }
+}
+
+@Composable
+private fun ImageCorrectionSlider(
+    label: String,
+    valueText: String,
+    value: Float,
+    valueRange: ClosedFloatingPointRange<Float>,
+    palette: ImageDecoderPalette,
+    onValueChange: (Float) -> Unit,
+) {
+    Column {
+        Row(modifier = Modifier.fillMaxWidth()) {
+            Text(
+                text = label,
+                modifier = Modifier.weight(1f),
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Black,
+            )
+            Text(
+                text = valueText,
+                fontFamily = FontFamily.Monospace,
+                fontSize = 12.sp,
+                fontWeight = FontWeight.Bold,
+            )
+        }
+        Slider(
+            value = value.coerceIn(valueRange.start, valueRange.endInclusive),
+            onValueChange = onValueChange,
+            valueRange = valueRange,
+            colors = SliderDefaults.colors(
+                thumbColor = palette.foreground,
+                activeTrackColor = palette.foreground,
+                inactiveTrackColor = palette.muted,
+            ),
+        )
+    }
+}
+
+private fun signedValue(value: Float): String {
+    val rounded = value.roundToInt()
+    return if (rounded > 0) "+$rounded" else rounded.toString()
 }
 
 @Composable

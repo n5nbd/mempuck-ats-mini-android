@@ -1,7 +1,7 @@
 package com.n5nbd.mempuck.atsmini.img.model
 
 enum class ImageDecoderSelection(val label: String) {
-    AUTO("AUTO"),
+    AUTO("??"),
     SSTV("R36"),
     MARTIN_M1("M1"),
     MARTIN_M2("M2"),
