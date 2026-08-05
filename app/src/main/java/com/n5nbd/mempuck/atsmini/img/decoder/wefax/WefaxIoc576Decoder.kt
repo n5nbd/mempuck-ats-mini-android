@@ -4,18 +4,18 @@ import kotlin.math.PI
 import kotlin.math.atan2
 import kotlin.math.cos
 import kotlin.math.exp
-import kotlin.math.floor
+import kotlin.math.hypot
 import kotlin.math.roundToInt
 import kotlin.math.sin
-import java.util.ArrayDeque
 
 /**
  * Application-local analogue weather-fax receiver for the common 120 LPM / IOC 576 format.
  *
- * The decoder deliberately separates acquisition from reception. Phasing establishes the line
- * period, horizontal phase, and black/white audio tones. Once reception begins those settings are
- * frozen: weak audio, silence, noise, or a returning signal can damage raster data, but cannot
- * restart the page or replace the established timing.
+ * The decoder is deliberately fixed to 120 LPM / IOC 576. Acquisition may establish the start
+ * phase and black/white audio tones, but it never changes raster speed or width. Every fixed
+ * half-second line span is buffered first and then resampled across exactly 1809 pixels. LISTEN may
+ * also begin inside an active page with an arbitrary horizontal phase. Once reception begins, weak
+ * audio, silence, noise, or a returning signal cannot restart the page or change its timing.
  */
 class WefaxIoc576Decoder(
     private val sampleRateHz: Int,
@@ -53,7 +53,8 @@ class WefaxIoc576Decoder(
     private val pixelSums = LongArray(IMAGE_WIDTH)
     private val pixelCounts = IntArray(IMAGE_WIDTH)
     private val currentLine = IntArray(IMAGE_WIDTH)
-    private val phasingIntervals = ArrayDeque<Long>()
+    private var lineLuma = IntArray(nominalLinePeriod.roundToInt().coerceAtLeast(1) + 8)
+    private var lineLumaCount = 0
 
     private var stage = Stage.SEARCHING
     private var absoluteSample = 0L
@@ -66,7 +67,6 @@ class WefaxIoc576Decoder(
     private var iocHalfCycles = 0
     private var lineStartSample = 0.0
     private var nextLineBoundary = 0.0
-    private var linePeriodSamples = nominalLinePeriod
     private var blackFrequencyHz = BLACK_FREQUENCY_HZ
     private var whiteFrequencyHz = WHITE_FREQUENCY_HZ
     private var candidateBlackSum = 0.0
@@ -77,6 +77,15 @@ class WefaxIoc576Decoder(
     private var completedLines = 0
     private var linesSinceFrame = 0
     private var finished = false
+    private var lateJoin = false
+    private var iocDetectedSample = Long.MIN_VALUE
+    private var lateJoinWindowStart = Long.MIN_VALUE
+    private var lateJoinObservations = 0
+    private var lateJoinStrongValidObservations = 0
+    private var lateJoinFrequencyMin = Double.POSITIVE_INFINITY
+    private var lateJoinFrequencyMax = Double.NEGATIVE_INFINITY
+    private var lateJoinFrequencyMean = 0.0
+    private var lateJoinFrequencyM2 = 0.0
 
     init {
         require(sampleRateHz >= 8_000) { "WEFAX sample rate is too low: $sampleRateHz" }
@@ -91,7 +100,7 @@ class WefaxIoc576Decoder(
         if (finished) return
         val safeCount = count.coerceIn(0, samples.size)
         for (index in 0 until safeCount) {
-            val frequencyHz = demodulator.process(samples[index])
+            val demodulated = demodulator.process(samples[index])
             val sampleIndex = absoluteSample
             absoluteSample += 1
 
@@ -100,11 +109,19 @@ class WefaxIoc576Decoder(
             when (stage) {
                 Stage.SEARCHING,
                 Stage.IOC_576,
-                -> processAcquisitionSample(sampleIndex, frequencyHz)
+                -> {
+                    processAcquisitionSample(sampleIndex, demodulated.frequencyHz)
+                    if (
+                        stage != Stage.PHASING &&
+                        observeLateJoinCandidate(sampleIndex, demodulated)
+                    ) {
+                        processRasterSample(sampleIndex, demodulated.frequencyHz)
+                    }
+                }
 
                 Stage.PHASING,
                 Stage.RECEIVING,
-                -> processRasterSample(sampleIndex, frequencyHz)
+                -> processRasterSample(sampleIndex, demodulated.frequencyHz)
 
                 Stage.COMPLETE -> Unit
             }
@@ -120,13 +137,13 @@ class WefaxIoc576Decoder(
             emitFrame(complete = true)
             listener.onStage(
                 Stage.COMPLETE,
-                MODE_NAME,
+                activeModeName(),
                 frequencyCorrectionHz(),
                 100,
             )
             listener.onDiagnostic(
                 "WEFAX complete reason=$reason lines=$completedLines " +
-                    "line_samples=${format(linePeriodSamples)}",
+                    "line_samples=${format(nominalLinePeriod)} raster=span_to_1809",
             )
         } else {
             listener.onDiagnostic(
@@ -163,6 +180,8 @@ class WefaxIoc576Decoder(
             iocHalfCycles += 1
             if (iocHalfCycles == IOC_REQUIRED_HALF_CYCLES) {
                 stage = Stage.IOC_576
+                iocDetectedSample = sampleIndex
+                resetLateJoinWindow()
                 listener.onStage(Stage.IOC_576, MODE_NAME, 0, 55)
                 listener.onDiagnostic(
                     "WEFAX IOC576 detected half_cycles=$iocHalfCycles",
@@ -186,17 +205,13 @@ class WefaxIoc576Decoder(
         } else {
             0L
         }
-        val periodOkay = interval.toDouble() in nominalLinePeriod * 0.82..nominalLinePeriod * 1.18
+        val periodOkay = interval.toDouble() in nominalLinePeriod * 0.88..nominalLinePeriod * 1.12
         val brightFraction = if (interval > 0) highWidth.toDouble() / interval else 0.0
         val shapeOkay = brightFraction in ASYMMETRIC_WHITE_FRACTION ||
             brightFraction in SYMMETRIC_WHITE_FRACTION
         val edgeCountOkay = transitionsSinceRising in 1..3
 
         if (periodOkay && shapeOkay && edgeCountOkay) {
-            phasingIntervals.addLast(interval)
-            while (phasingIntervals.size > PHASING_INTERVAL_WINDOW) {
-                phasingIntervals.removeFirst()
-            }
             goodPhasingIntervals += 1
             val confidence = (goodPhasingIntervals * 100 / PHASING_REQUIRED_INTERVALS)
                 .coerceIn(1, 99)
@@ -214,7 +229,6 @@ class WefaxIoc576Decoder(
     }
 
     private fun resetPhasingCandidate() {
-        phasingIntervals.clear()
         goodPhasingIntervals = 0
         candidateBlackSum = 0.0
         candidateBlackCount = 0
@@ -227,8 +241,10 @@ class WefaxIoc576Decoder(
     }
 
     private fun lockPhasing(risingSample: Long) {
-        linePeriodSamples = median(phasingIntervals.map(Long::toDouble))
-            .coerceIn(nominalLinePeriod * 0.82, nominalLinePeriod * 1.18)
+        lateJoin = false
+        resetLateJoinWindow()
+        // 120 LPM is the format contract. Measured phasing intervals validate acquisition only;
+        // they never alter the raster clock or horizontal construction.
 
         val measuredBlack = candidateBlackSum / candidateBlackCount.coerceAtLeast(1)
         val measuredWhite = candidateWhiteSum / candidateWhiteCount.coerceAtLeast(1)
@@ -243,7 +259,7 @@ class WefaxIoc576Decoder(
 
         stage = Stage.PHASING
         lineStartSample = risingSample.toDouble()
-        nextLineBoundary = lineStartSample + linePeriodSamples
+        nextLineBoundary = lineStartSample + nominalLinePeriod
         clearLineAccumulator()
         listener.onStage(
             Stage.PHASING,
@@ -252,38 +268,135 @@ class WefaxIoc576Decoder(
             100,
         )
         listener.onDiagnostic(
-            "WEFAX phasing_lock line_samples=${format(linePeriodSamples)} " +
+            "WEFAX phasing_lock fixed_lpm=120 line_samples=${format(nominalLinePeriod)} " +
                 "black_hz=${format(blackFrequencyHz)} white_hz=${format(whiteFrequencyHz)} " +
                 "correction_hz=${frequencyCorrectionHz()}",
         )
+    }
+
+    private fun observeLateJoinCandidate(
+        sampleIndex: Long,
+        demodulated: DemodulatedSample,
+    ): Boolean {
+        if (stage == Stage.RECEIVING || stage == Stage.PHASING || finished) return false
+        if (sampleIndex % LATE_JOIN_DECIMATION != 0L) return false
+
+        if (lateJoinWindowStart == Long.MIN_VALUE) {
+            lateJoinWindowStart = sampleIndex
+        }
+
+        lateJoinObservations += 1
+        val strongAndValid = demodulated.signalLevel >= LATE_JOIN_MIN_SIGNAL_LEVEL &&
+            demodulated.frequencyHz in LATE_JOIN_FREQUENCY_RANGE
+        if (strongAndValid) {
+            lateJoinStrongValidObservations += 1
+            lateJoinFrequencyMin = minOf(lateJoinFrequencyMin, demodulated.frequencyHz)
+            lateJoinFrequencyMax = maxOf(lateJoinFrequencyMax, demodulated.frequencyHz)
+            val delta = demodulated.frequencyHz - lateJoinFrequencyMean
+            lateJoinFrequencyMean += delta / lateJoinStrongValidObservations
+            lateJoinFrequencyM2 += delta * (demodulated.frequencyHz - lateJoinFrequencyMean)
+        }
+
+        val elapsedSamples = sampleIndex - lateJoinWindowStart
+        if (elapsedSamples < (sampleRateHz * LATE_JOIN_FAST_SECONDS).toLong()) return false
+
+        val validFraction = lateJoinStrongValidObservations.toDouble() /
+            lateJoinObservations.coerceAtLeast(1)
+        val span = if (lateJoinStrongValidObservations > 0) {
+            lateJoinFrequencyMax - lateJoinFrequencyMin
+        } else {
+            0.0
+        }
+        val deviation = if (lateJoinStrongValidObservations > 1) {
+            kotlin.math.sqrt(lateJoinFrequencyM2 / (lateJoinStrongValidObservations - 1))
+        } else {
+            0.0
+        }
+        val headerWindowActive = goodPhasingIntervals > 0 ||
+            (iocDetectedSample != Long.MIN_VALUE &&
+                sampleIndex - iocDetectedSample <
+                (sampleRateHz * HEADER_ACQUISITION_GRACE_SECONDS).toLong())
+        val variedFax = validFraction >= LATE_JOIN_MIN_VALID_FRACTION &&
+            (span >= LATE_JOIN_FAST_SPAN_HZ || deviation >= LATE_JOIN_FAST_DEVIATION_HZ)
+        val sustainedFax = elapsedSamples >= (sampleRateHz * LATE_JOIN_SLOW_SECONDS).toLong() &&
+            validFraction >= LATE_JOIN_SUSTAINED_VALID_FRACTION &&
+            (span >= LATE_JOIN_SLOW_SPAN_HZ || deviation >= LATE_JOIN_SLOW_DEVIATION_HZ)
+
+        if (!headerWindowActive && (variedFax || sustainedFax)) {
+            startLateJoin(sampleIndex, validFraction, span, deviation)
+            return true
+        }
+
+        if (elapsedSamples >= (sampleRateHz * LATE_JOIN_WINDOW_RESET_SECONDS).toLong()) {
+            listener.onDiagnostic(
+                "WEFAX late_join_window rejected valid=${format(validFraction * 100.0)}% " +
+                    "span_hz=${format(span)} deviation_hz=${format(deviation)} " +
+                    "header_active=$headerWindowActive",
+            )
+            resetLateJoinWindow()
+        }
+        return false
+    }
+
+    private fun startLateJoin(
+        sampleIndex: Long,
+        validFraction: Double,
+        spanHz: Double,
+        deviationHz: Double,
+    ) {
+        lateJoin = true
+        stage = Stage.RECEIVING
+        blackFrequencyHz = BLACK_FREQUENCY_HZ
+        whiteFrequencyHz = WHITE_FREQUENCY_HZ
+        lineStartSample = sampleIndex.toDouble()
+        nextLineBoundary = lineStartSample + nominalLinePeriod
+        clearLineAccumulator()
+        listener.onStage(
+            Stage.RECEIVING,
+            LATE_JOIN_MODE_NAME,
+            0,
+            LATE_JOIN_CONFIDENCE,
+        )
+        listener.onDiagnostic(
+            "WEFAX late_join_start sample=$sampleIndex " +
+                "valid=${format(validFraction * 100.0)}% span_hz=${format(spanHz)} " +
+                "deviation_hz=${format(deviationHz)} lpm=120 " +
+                "line_samples=${format(nominalLinePeriod)} raster=span_to_1809",
+        )
+        resetLateJoinWindow()
+    }
+
+    private fun resetLateJoinWindow() {
+        lateJoinWindowStart = Long.MIN_VALUE
+        lateJoinObservations = 0
+        lateJoinStrongValidObservations = 0
+        lateJoinFrequencyMin = Double.POSITIVE_INFINITY
+        lateJoinFrequencyMax = Double.NEGATIVE_INFINITY
+        lateJoinFrequencyMean = 0.0
+        lateJoinFrequencyM2 = 0.0
     }
 
     private fun processRasterSample(sampleIndex: Long, frequencyHz: Double) {
         while (sampleIndex.toDouble() >= nextLineBoundary) {
             finalizeRasterLine()
             lineStartSample = nextLineBoundary
-            nextLineBoundary += linePeriodSamples
+            nextLineBoundary += nominalLinePeriod
             clearLineAccumulator()
         }
 
-        val position = (sampleIndex.toDouble() - lineStartSample) / linePeriodSamples
-        val pixel = floor(position * IMAGE_WIDTH).toInt().coerceIn(0, IMAGE_WIDTH - 1)
-        pixelSums[pixel] = pixelSums[pixel] + frequencyToLuma(frequencyHz).toLong()
-        pixelCounts[pixel] += 1
+        appendLineLuma(frequencyToLuma(frequencyHz))
+    }
+
+    private fun appendLineLuma(value: Int) {
+        if (lineLumaCount == lineLuma.size) {
+            lineLuma = lineLuma.copyOf(lineLuma.size * 2)
+        }
+        lineLuma[lineLumaCount] = value
+        lineLumaCount += 1
     }
 
     private fun finalizeRasterLine() {
-        var previous = 0
-        for (pixel in 0 until IMAGE_WIDTH) {
-            val count = pixelCounts[pixel]
-            val value = if (count > 0) {
-                (pixelSums[pixel] / count).toInt().coerceIn(0, 255)
-            } else {
-                previous
-            }
-            currentLine[pixel] = value
-            previous = value
-        }
+        resampleCurrentSpanToRaster()
 
         if (stage == Stage.PHASING && isPhasingLine(currentLine)) {
             return
@@ -293,13 +406,13 @@ class WefaxIoc576Decoder(
             stage = Stage.RECEIVING
             listener.onStage(
                 Stage.RECEIVING,
-                MODE_NAME,
+                activeModeName(),
                 frequencyCorrectionHz(),
                 100,
             )
             listener.onDiagnostic(
                 "WEFAX image_start sample=${lineStartSample.roundToInt()} " +
-                    "line_samples=${format(linePeriodSamples)}",
+                    "line_samples=${format(nominalLinePeriod)}",
             )
         }
 
@@ -314,7 +427,7 @@ class WefaxIoc576Decoder(
             finished = true
             stage = Stage.COMPLETE
             emitFrame(complete = true)
-            listener.onStage(Stage.COMPLETE, MODE_NAME, frequencyCorrectionHz(), 100)
+            listener.onStage(Stage.COMPLETE, activeModeName(), frequencyCorrectionHz(), 100)
             listener.onDiagnostic("WEFAX complete reason=max_lines lines=$completedLines")
             return
         }
@@ -412,25 +525,56 @@ class WefaxIoc576Decoder(
     }
 
     private fun clearLineAccumulator() {
+        lineLumaCount = 0
+    }
+
+    /**
+     * Horizontal construction has one input: every demodulated luma sample collected in this
+     * completed 120-LPM line span. The actual span count is divided directly into 1809 bins.
+     * No detected LPM, stale period, half-width probe, or corrective scaling participates here.
+     */
+    private fun resampleCurrentSpanToRaster() {
         pixelSums.fill(0L)
         pixelCounts.fill(0)
+
+        if (lineLumaCount <= 0) {
+            currentLine.fill(0)
+            return
+        }
+
+        for (source in 0 until lineLumaCount) {
+            val pixel = ((source.toLong() * IMAGE_WIDTH) / lineLumaCount)
+                .toInt()
+                .coerceIn(0, IMAGE_WIDTH - 1)
+            pixelSums[pixel] += lineLuma[source].toLong()
+            pixelCounts[pixel] += 1
+        }
+
+        var previous = lineLuma[0]
+        for (pixel in 0 until IMAGE_WIDTH) {
+            val count = pixelCounts[pixel]
+            val value = if (count > 0) {
+                (pixelSums[pixel] / count).toInt().coerceIn(0, 255)
+            } else {
+                previous
+            }
+            currentLine[pixel] = value
+            previous = value
+        }
     }
+
+    private fun activeModeName(): String =
+        if (lateJoin) LATE_JOIN_MODE_NAME else MODE_NAME
 
     private fun frequencyCorrectionHz(): Int =
         (((blackFrequencyHz + whiteFrequencyHz) / 2.0) - CENTER_FREQUENCY_HZ).roundToInt()
 
-    private fun median(values: List<Double>): Double {
-        if (values.isEmpty()) return nominalLinePeriod
-        val sorted = values.sorted()
-        val middle = sorted.size / 2
-        return if (sorted.size % 2 == 0) {
-            (sorted[middle - 1] + sorted[middle]) / 2.0
-        } else {
-            sorted[middle]
-        }
-    }
-
     private fun format(value: Double): String = String.format(java.util.Locale.US, "%.3f", value)
+
+    private data class DemodulatedSample(
+        val frequencyHz: Double,
+        val signalLevel: Double,
+    )
 
     private class FmSubcarrierDemodulator(sampleRateHz: Int) {
         private val sampleRate = sampleRateHz.toDouble()
@@ -446,7 +590,7 @@ class WefaxIoc576Decoder(
         private var havePhase = false
         private var smoothedFrequency = CENTER_FREQUENCY_HZ
 
-        fun process(sample: Short): Double {
+        fun process(sample: Short): DemodulatedSample {
             val normalized = sample.toDouble() / 32768.0
             var iValue = normalized * cos(oscillatorPhase)
             var qValue = -normalized * sin(oscillatorPhase)
@@ -464,7 +608,7 @@ class WefaxIoc576Decoder(
             if (!havePhase) {
                 previousBasebandPhase = phase
                 havePhase = true
-                return smoothedFrequency
+                return DemodulatedSample(smoothedFrequency, hypot(iValue, qValue))
             }
             var delta = phase - previousBasebandPhase
             previousBasebandPhase = phase
@@ -474,19 +618,19 @@ class WefaxIoc576Decoder(
             if (frequency in MIN_VALID_FREQUENCY_HZ..MAX_VALID_FREQUENCY_HZ) {
                 smoothedFrequency += smoothAlpha * (frequency - smoothedFrequency)
             }
-            return smoothedFrequency
+            return DemodulatedSample(smoothedFrequency, hypot(iValue, qValue))
         }
     }
 
     companion object {
         const val IMAGE_WIDTH = 1809
         const val MODE_NAME = "WEFAX 120/576"
+        const val LATE_JOIN_MODE_NAME = "WEFAX 120/576 LATE JOIN"
 
         private const val LINES_PER_SECOND = 2.0
         private const val IOC_SELECTION_HZ = 300.0
         private const val IOC_REQUIRED_HALF_CYCLES = 240
         private const val PHASING_REQUIRED_INTERVALS = 6
-        private const val PHASING_INTERVAL_WINDOW = 8
         private const val CENTER_FREQUENCY_HZ = 1900.0
         private const val BLACK_FREQUENCY_HZ = 1500.0
         private const val WHITE_FREQUENCY_HZ = 2300.0
@@ -503,6 +647,20 @@ class WefaxIoc576Decoder(
         private const val CAPACITY_GROWTH_LINES = 128
         private const val MAX_IMAGE_LINES = 4096
         private const val FRAME_INTERVAL_LINES = 4
+        private const val LATE_JOIN_DECIMATION = 32L
+        private const val LATE_JOIN_MIN_SIGNAL_LEVEL = 0.012
+        private const val LATE_JOIN_FAST_SECONDS = 1.5
+        private const val LATE_JOIN_SLOW_SECONDS = 3.5
+        private const val LATE_JOIN_WINDOW_RESET_SECONDS = 4.5
+        private const val HEADER_ACQUISITION_GRACE_SECONDS = 10.0
+        private const val LATE_JOIN_MIN_VALID_FRACTION = 0.78
+        private const val LATE_JOIN_SUSTAINED_VALID_FRACTION = 0.88
+        private const val LATE_JOIN_FAST_SPAN_HZ = 140.0
+        private const val LATE_JOIN_SLOW_SPAN_HZ = 45.0
+        private const val LATE_JOIN_FAST_DEVIATION_HZ = 38.0
+        private const val LATE_JOIN_SLOW_DEVIATION_HZ = 14.0
+        private const val LATE_JOIN_CONFIDENCE = 70
+        private val LATE_JOIN_FREQUENCY_RANGE = 1200.0..2600.0
         private val ASYMMETRIC_WHITE_FRACTION = 0.015..0.13
         private val SYMMETRIC_WHITE_FRACTION = 0.34..0.66
     }

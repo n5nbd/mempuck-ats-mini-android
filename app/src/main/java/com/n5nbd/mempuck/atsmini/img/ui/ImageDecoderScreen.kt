@@ -35,6 +35,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -100,6 +101,15 @@ fun ImageDecoderScreen(
     }
 
     val context = LocalContext.current
+    val view = LocalView.current
+
+    DisposableEffect(view, state.listening) {
+        view.keepScreenOn = state.listening
+        onDispose {
+            view.keepScreenOn = false
+        }
+    }
+
     val sourceFrame = state.image
     var acceptedCorrection by remember(sourceFrame?.revision) {
         mutableStateOf(ImageCorrection())
