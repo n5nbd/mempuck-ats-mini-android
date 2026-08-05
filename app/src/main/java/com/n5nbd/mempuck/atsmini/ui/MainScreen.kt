@@ -7,6 +7,7 @@ import android.net.Uri
 import android.view.WindowManager
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -61,11 +62,14 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -81,6 +85,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import com.n5nbd.mempuck.atsmini.BuildConfig
+import com.n5nbd.mempuck.atsmini.R
 import com.n5nbd.mempuck.atsmini.img.model.ImageAudioInput
 import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderSelection
 import com.n5nbd.mempuck.atsmini.img.model.ImageDecoderState
@@ -509,31 +514,27 @@ private fun Header(
             Column {
                 Text(
                     text = "MemPuck",
-                    fontSize = 25.sp,
+                    fontSize = 28.sp,
                     fontWeight = FontWeight.Black,
-                    letterSpacing = 1.5.sp,
+                    fontFamily = FontFamily.Serif,
+                    letterSpacing = 0.5.sp,
                 )
-                Text(
-                    text = "Memory Manager",
-                    fontSize = 16.sp,
-                )
-            }
-            Column(horizontalAlignment = Alignment.End) {
                 Text(
                     text = "ATS Mini",
-                    fontSize = 23.sp,
-                    fontWeight = FontWeight.Black,
-                    letterSpacing = 1.sp,
-                )
-                Text(
-                    text = headerReceiverStateText(state),
-                    fontSize = 14.sp,
-                    fontFamily = FontFamily.Monospace,
+                    fontSize = 16.sp,
                     fontWeight = FontWeight.Bold,
-                    color = colors.muted,
-                    maxLines = 1,
+                    letterSpacing = 0.5.sp,
                 )
             }
+            Text(
+                text = headerReceiverStateText(state),
+                modifier = Modifier.padding(top = 10.dp),
+                fontSize = 14.sp,
+                fontFamily = FontFamily.Monospace,
+                fontWeight = FontWeight.Bold,
+                color = colors.muted,
+                maxLines = 1,
+            )
         }
 
         Spacer(Modifier.height(10.dp))
@@ -2420,21 +2421,22 @@ private fun AboutContent(
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp),
     ) {
-        PuckSilhouette(
+        BrandCharacter(
             colors = colors,
             compact = compact,
         )
         Text(
-            text = "MEMPUCK",
-            fontSize = if (compact) 24.sp else 31.sp,
+            text = "MemPuck",
+            fontSize = if (compact) 25.sp else 33.sp,
             fontWeight = FontWeight.Black,
-            letterSpacing = 2.sp,
+            fontFamily = FontFamily.Serif,
+            letterSpacing = 0.5.sp,
         )
         Text(
-            text = "FOR ATS MINI",
+            text = "ATS Mini",
             fontSize = if (compact) 16.sp else 20.sp,
             fontWeight = FontWeight.Black,
-            letterSpacing = 1.sp,
+            letterSpacing = 0.8.sp,
         )
         Text(
             text = "VERSION ${BuildConfig.VERSION_NAME}",
@@ -2469,51 +2471,21 @@ private fun AboutContent(
 }
 
 @Composable
-private fun PuckSilhouette(
+private fun BrandCharacter(
     colors: PuckColors,
     compact: Boolean,
 ) {
-    Canvas(
+    Image(
+        painter = painterResource(
+            id = if (compact) R.drawable.brand_about else R.drawable.brand_splash,
+        ),
+        contentDescription = null,
         modifier = Modifier
-            .width(if (compact) 132.dp else 184.dp)
-            .height(if (compact) 78.dp else 108.dp),
-    ) {
-        val puckLeft = size.width * 0.08f
-        val puckTop = size.height * 0.15f
-        val puckWidth = size.width * 0.70f
-        val puckHeight = size.height * 0.68f
-        val ellipseHeight = size.height * 0.32f
-        val bodyTop = puckTop + ellipseHeight * 0.45f
-
-        drawRoundRect(
-            color = colors.foreground,
-            topLeft = Offset(puckLeft, bodyTop),
-            size = Size(puckWidth, puckHeight - ellipseHeight * 0.25f),
-            cornerRadius = CornerRadius(ellipseHeight * 0.35f, ellipseHeight * 0.35f),
-        )
-        drawOval(
-            color = colors.foreground,
-            topLeft = Offset(puckLeft, puckTop),
-            size = Size(puckWidth, ellipseHeight),
-        )
-
-        val cableY = puckTop + puckHeight * 0.58f
-        val cableStartX = puckLeft + puckWidth * 0.92f
-        val cableEndX = size.width * 0.92f
-        drawLine(
-            color = colors.foreground,
-            start = Offset(cableStartX, cableY),
-            end = Offset(cableEndX, cableY),
-            strokeWidth = size.height * 0.10f,
-            cap = StrokeCap.Round,
-        )
-        drawRoundRect(
-            color = colors.foreground,
-            topLeft = Offset(cableEndX - size.width * 0.01f, cableY - size.height * 0.11f),
-            size = Size(size.width * 0.08f, size.height * 0.22f),
-            cornerRadius = CornerRadius(size.height * 0.03f, size.height * 0.03f),
-        )
-    }
+            .width(if (compact) 104.dp else 176.dp)
+            .height(if (compact) 160.dp else 232.dp),
+        contentScale = ContentScale.Fit,
+        colorFilter = ColorFilter.tint(colors.foreground),
+    )
 }
 
 @Composable
