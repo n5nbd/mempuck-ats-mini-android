@@ -12,6 +12,7 @@ import com.n5nbd.mempuck.atsmini.img.decoder.robot36.MartinM2Decoder
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.Robot36Decoder
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.ScottieS1Decoder
 import com.n5nbd.mempuck.atsmini.img.decoder.robot36.ScottieS2Decoder
+import com.n5nbd.mempuck.atsmini.img.decoder.wefax.WefaxIoc576Decoder
 import com.n5nbd.mempuck.atsmini.img.diagnostics.ImageDiagnosticLogger
 import com.n5nbd.mempuck.atsmini.img.model.DecodedImageFrame
 import com.n5nbd.mempuck.atsmini.img.model.ImageAudioInput
@@ -47,6 +48,7 @@ class ImageDecoderRepository(
     private var martinM2Decoder: MartinM2Decoder? = null
     private var scottieS1Decoder: ScottieS1Decoder? = null
     private var scottieS2Decoder: ScottieS2Decoder? = null
+    private var wefaxDecoder: WefaxIoc576Decoder? = null
     private var activeDecoder: ActiveSstvDecoder? = null
     private var autoRearmPending = false
     private var captureBuffer: PcmRingBuffer? = null
@@ -61,9 +63,12 @@ class ImageDecoderRepository(
         synchronized(sessionLock) {
             val current = state.value
             if (current.listening) {
-                // WEFAX is not a live decoder in this slice. AUTO, R36, M1, M2, S1, and S2
-                // can be hot-switched without interrupting AudioRecord.
-                if (decoder == ImageDecoderSelection.WEFAX || decoder == current.decoder) return
+                // SSTV modes may be hot-switched. WEFAX owns a long-lived line clock, so
+                // entering or leaving it requires an explicit STOP and fresh LISTEN.
+                if (decoder == current.decoder) return
+                if (decoder == ImageDecoderSelection.WEFAX ||
+                    current.decoder == ImageDecoderSelection.WEFAX
+                ) return
 
                 val sampleRateHz = activeSampleRateHz ?: current.sampleRateHz
                 imageReplacementProtection.arm(current.image?.completedLines ?: 0)
@@ -72,6 +77,7 @@ class ImageDecoderRepository(
                 martinM2Decoder = null
                 scottieS1Decoder = null
                 scottieS2Decoder = null
+                wefaxDecoder = null
                 activeDecoder = null
                 autoRearmPending = false
 
@@ -111,6 +117,7 @@ class ImageDecoderRepository(
             martinM2Decoder = null
             scottieS1Decoder = null
             scottieS2Decoder = null
+            wefaxDecoder = null
             activeDecoder = null
             autoRearmPending = false
             activeSampleRateHz = null
@@ -157,9 +164,6 @@ class ImageDecoderRepository(
         if (current.input != ImageAudioInput.MIC) {
             return fail("SELECT MIC FOR THIS TEST SLICE")
         }
-        if (current.decoder == ImageDecoderSelection.WEFAX) {
-            return fail("WEFAX DECODER FOLLOWS THE SSTV HARDWARE TEST")
-        }
         if (!hasMicrophonePermission()) {
             return ImageListenResult.PermissionRequired
         }
@@ -171,6 +175,7 @@ class ImageDecoderRepository(
             martinM2Decoder = null
             scottieS1Decoder = null
             scottieS2Decoder = null
+            wefaxDecoder = null
             activeDecoder = null
             autoRearmPending = false
             captureBuffer = null
@@ -240,7 +245,7 @@ class ImageDecoderRepository(
         finishDiagnostics("STOP_OR_LIFECYCLE")
         _state.update { current ->
             val completeFrame = current.image?.let { frame ->
-                frame.completedLines >= frame.height
+                frame.complete
             } == true
             current.copy(
                 session = ImageDecoderSession.IDLE,
@@ -261,6 +266,7 @@ class ImageDecoderRepository(
             martinM2Decoder = null
             scottieS1Decoder = null
             scottieS2Decoder = null
+            wefaxDecoder = null
             activeDecoder = null
             autoRearmPending = false
             imageReplacementProtection.clear()
@@ -362,7 +368,7 @@ class ImageDecoderRepository(
             ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder?.process(samples, count)
             ImageDecoderSelection.SCOTTIE_S1 -> scottieS1Decoder?.process(samples, count)
             ImageDecoderSelection.SCOTTIE_S2 -> scottieS2Decoder?.process(samples, count)
-            ImageDecoderSelection.WEFAX -> Unit
+            ImageDecoderSelection.WEFAX -> wefaxDecoder?.process(samples, count)
         }
 
         // A completed AUTO frame must remain visible and savable, but the decoder
@@ -396,7 +402,7 @@ class ImageDecoderRepository(
             ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder?.finishCapture(reason)
             ImageDecoderSelection.SCOTTIE_S1 -> scottieS1Decoder?.finishCapture(reason)
             ImageDecoderSelection.SCOTTIE_S2 -> scottieS2Decoder?.finishCapture(reason)
-            ImageDecoderSelection.WEFAX -> Unit
+            ImageDecoderSelection.WEFAX -> wefaxDecoder?.finishCapture(reason)
         }
     }
 
@@ -492,6 +498,11 @@ class ImageDecoderRepository(
 
             else -> null
         }
+        wefaxDecoder = if (selection == ImageDecoderSelection.WEFAX) {
+            WefaxIoc576Decoder(sampleRateHz, wefaxListener())
+        } else {
+            null
+        }
     }
 
     private fun decoderPipelineReady(): Boolean = when (state.value.decoder) {
@@ -504,7 +515,7 @@ class ImageDecoderRepository(
         ImageDecoderSelection.MARTIN_M2 -> martinM2Decoder != null
         ImageDecoderSelection.SCOTTIE_S1 -> scottieS1Decoder != null
         ImageDecoderSelection.SCOTTIE_S2 -> scottieS2Decoder != null
-        ImageDecoderSelection.WEFAX -> true
+        ImageDecoderSelection.WEFAX -> wefaxDecoder != null
     }
 
     private fun rearmAutoDetectionLocked() {
@@ -875,6 +886,7 @@ class ImageDecoderRepository(
             argbPixels = argbPixels.copyOf(),
             completedLines = completedLines,
             revision = frameRevision,
+            complete = complete,
         )
         _state.update { current ->
             current.copy(
@@ -894,6 +906,101 @@ class ImageDecoderRepository(
                 } else {
                     current.decoderConfidence
                 },
+                image = frame,
+                error = null,
+            )
+        }
+    }
+
+    private fun wefaxListener(): WefaxIoc576Decoder.Listener =
+        object : WefaxIoc576Decoder.Listener {
+            override fun onStage(
+                stage: WefaxIoc576Decoder.Stage,
+                modeName: String,
+                correctionHz: Int,
+                confidence: Int,
+            ) {
+                if (imageReplacementProtection.active) {
+                    imageReplacementProtection.recordMode(modeName)
+                    imageReplacementProtection.recordAdaptiveStatus(
+                        modeName = modeName,
+                        correctionHz = correctionHz,
+                        confidence = confidence,
+                    )
+                    return
+                }
+                _state.update { current ->
+                    current.copy(
+                        signal = when (stage) {
+                            WefaxIoc576Decoder.Stage.RECEIVING -> ImageSignalState.DECODING
+                            WefaxIoc576Decoder.Stage.COMPLETE -> ImageSignalState.COMPLETE
+                            else -> ImageSignalState.WAITING
+                        },
+                        detectedMode = if (stage == WefaxIoc576Decoder.Stage.SEARCHING) {
+                            null
+                        } else {
+                            modeName
+                        },
+                        frequencyCorrectionHz = correctionHz.takeIf {
+                            stage == WefaxIoc576Decoder.Stage.PHASING ||
+                                stage == WefaxIoc576Decoder.Stage.RECEIVING ||
+                                stage == WefaxIoc576Decoder.Stage.COMPLETE
+                        },
+                        decoderConfidence = confidence.coerceIn(0, 100),
+                        error = null,
+                    )
+                }
+            }
+
+            override fun onFrame(
+                width: Int,
+                height: Int,
+                argbPixels: IntArray,
+                completedLines: Int,
+                complete: Boolean,
+            ) {
+                decodedWefaxFrame(
+                    width = width,
+                    height = height,
+                    argbPixels = argbPixels,
+                    completedLines = completedLines,
+                    complete = complete,
+                )
+            }
+
+            override fun onDiagnostic(message: String) {
+                diagnosticLogger.decoder(message)
+            }
+        }
+
+    private fun decodedWefaxFrame(
+        width: Int,
+        height: Int,
+        argbPixels: IntArray,
+        completedLines: Int,
+        complete: Boolean,
+    ) {
+        if (imageReplacementProtection.holdsFrame(completedLines)) return
+        val replacementMetadata = imageReplacementProtection.releaseForFrame(completedLines)
+        frameRevision += 1
+        val frame = DecodedImageFrame(
+            width = width,
+            height = height,
+            argbPixels = argbPixels.copyOf(),
+            completedLines = completedLines,
+            revision = frameRevision,
+            complete = complete,
+        )
+        _state.update { current ->
+            current.copy(
+                signal = if (complete) ImageSignalState.COMPLETE else ImageSignalState.DECODING,
+                detectedMode = replacementMetadata?.detectedMode
+                    ?: current.detectedMode
+                    ?: WefaxIoc576Decoder.MODE_NAME,
+                frequencyCorrectionHz = replacementMetadata?.frequencyCorrectionHz
+                    ?: current.frequencyCorrectionHz,
+                decoderConfidence = replacementMetadata?.decoderConfidence
+                    ?: current.decoderConfidence,
                 image = frame,
                 error = null,
             )

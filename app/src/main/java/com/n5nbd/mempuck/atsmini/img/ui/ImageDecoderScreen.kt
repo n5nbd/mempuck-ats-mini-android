@@ -89,8 +89,7 @@ fun ImageDecoderScreen(
         frame.completedLines > 0
     }
     val completedFrame = state.image?.takeIf { frame ->
-        state.signal == ImageSignalState.COMPLETE &&
-            frame.completedLines >= frame.height
+        state.signal == ImageSignalState.COMPLETE && frame.complete
     }
 
     ImagePanel(palette = palette) {
@@ -152,12 +151,23 @@ fun ImageDecoderScreen(
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(2.dp),
+                    alignment = if (
+                        state.signal == ImageSignalState.DECODING &&
+                        state.decoder == ImageDecoderSelection.WEFAX
+                    ) {
+                        Alignment.TopCenter
+                    } else {
+                        Alignment.Center
+                    },
                     contentScale = ContentScale.Fit,
                 )
             }
         }
 
-        state.image?.takeIf { state.signal == ImageSignalState.DECODING }?.let { frame ->
+        state.image?.takeIf {
+            state.signal == ImageSignalState.DECODING &&
+                state.decoder != ImageDecoderSelection.WEFAX
+        }?.let { frame ->
             val progress = (frame.completedLines.toFloat() / frame.height.toFloat())
                 .coerceIn(0f, 1f)
             Spacer(Modifier.height(4.dp))
@@ -187,7 +197,10 @@ fun ImageDecoderScreen(
                     text = decoder.label,
                     selected = state.decoder == decoder,
                     palette = palette,
-                    enabled = !state.listening || decoder != ImageDecoderSelection.WEFAX,
+                    enabled = !state.listening || (
+                        state.decoder != ImageDecoderSelection.WEFAX &&
+                            decoder != ImageDecoderSelection.WEFAX
+                        ),
                     onClick = { onSelectDecoder(decoder) },
                     modifier = Modifier.weight(1f),
                 )
@@ -513,7 +526,11 @@ private fun statusDetail(
     }.orEmpty()
     return when {
         state.signal == ImageSignalState.COMPLETE && frame != null ->
-            "${state.detectedMode ?: "SSTV"} COMPLETE • ${frame.completedLines}/${frame.height} LINES$adaptive"
+            "${state.detectedMode ?: "IMG"} COMPLETE • ${frame.completedLines} LINES$adaptive"
+
+        state.signal == ImageSignalState.DECODING &&
+            state.decoder == ImageDecoderSelection.WEFAX && frame != null ->
+            "WEFAX 120/576 • ${frame.completedLines} LINES • LOCKED THROUGH FADES$adaptive"
 
         state.signal == ImageSignalState.DECODING && frame != null ->
             "${state.detectedMode ?: "SSTV"} • ${frame.completedLines}/${frame.height} LINES$adaptive"
@@ -524,9 +541,12 @@ private fun statusDetail(
             "M1 LIVE MANUAL SYNC; TAP AUTO, R36, OR M2 TO SWITCH"
         state.listening && state.decoder == ImageDecoderSelection.MARTIN_M2 ->
             "M2 LIVE MANUAL SYNC; TAP AUTO, R36, OR M1 TO SWITCH"
+        state.listening && state.decoder == ImageDecoderSelection.WEFAX ->
+            "WAITING FOR IOC 576 / 120 LPM PHASING; STOP FINALIZES THE PAGE"
         state.listening -> "LISTENING FOR R36, M1, OR M2 VIS; MANUAL SWITCH AVAILABLE"
         !microphonePermissionGranted -> "MIC PERMISSION REQUESTS ONLY AFTER LISTEN"
-        state.decoder == ImageDecoderSelection.WEFAX -> "WEFAX ENGINE FOLLOWS SSTV HARDWARE TEST"
+        state.decoder == ImageDecoderSelection.WEFAX ->
+            "120 LPM / IOC 576 READY; PHASING LOCK IS HELD THROUGH SIGNAL FADES"
         else -> "R36 + M1 + M2 AUTO/LIVE MANUAL READY"
     }
 }

@@ -48,7 +48,7 @@ class ImageDiagnosticLogger(context: Context) {
         havePreviousSample = false
         resetInterval()
         lines.clear()
-        lines += "MemPuck IMG diagnostic slice 12"
+        lines += "MemPuck IMG diagnostic slice 13"
         lines += "started=${timestamp()}"
         lines += "input=$input decoder=$decoder sample_rate_hz=$sampleRateHz frame_samples=${sampleRateHz / 50}"
         lines += "audio_persistence=none"
