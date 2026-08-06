@@ -54,6 +54,8 @@ class WefaxIoc576Decoder(
     private val pixelCounts = IntArray(IMAGE_WIDTH)
     private val currentLine = IntArray(IMAGE_WIDTH)
     private var lineLuma = IntArray(nominalLinePeriod.roundToInt().coerceAtLeast(1) + 8)
+    private var lineFrequencyHz = DoubleArray(lineLuma.size)
+    private var lineSignalLevel = DoubleArray(lineLuma.size)
     private var lineLumaCount = 0
 
     private var stage = Stage.SEARCHING
@@ -69,10 +71,18 @@ class WefaxIoc576Decoder(
     private var nextLineBoundary = 0.0
     private var blackFrequencyHz = BLACK_FREQUENCY_HZ
     private var whiteFrequencyHz = WHITE_FREQUENCY_HZ
+    private var lockedFrequencyOffsetHz = 0.0
     private var candidateBlackSum = 0.0
     private var candidateBlackCount = 0L
     private var candidateWhiteSum = 0.0
     private var candidateWhiteCount = 0L
+    private var acquisitionCenterHz = CENTER_FREQUENCY_HZ
+    private val afcHistogram = IntArray(AFC_HISTOGRAM_BIN_COUNT)
+    private var afcWindowStartSample = Long.MIN_VALUE
+    private var afcWindowObservations = 0
+    private var afcDecimationCounter = 0
+    private var afcEstimateCount = 0
+    private var lastAfcEstimateSample = Long.MIN_VALUE
     private var imagePixels = IntArray(IMAGE_WIDTH * INITIAL_CAPACITY_LINES)
     private var completedLines = 0
     private var linesSinceFrame = 0
@@ -86,6 +96,14 @@ class WefaxIoc576Decoder(
     private var lateJoinFrequencyMax = Double.NEGATIVE_INFINITY
     private var lateJoinFrequencyMean = 0.0
     private var lateJoinFrequencyM2 = 0.0
+    private val trackingPhaseRows =
+        Array(TRACKING_WINDOW_LINES) { DoubleArray(TRACKING_PHASE_BINS) { Double.NaN } }
+    private var trackingRowCount = 0
+    private var trackingNextRow = 0
+    private var trackingAcceptedRows = 0
+    private var trackingStableCandidateHz = Double.NaN
+    private var trackingStableCandidateCount = 0
+    private var trackingLastReportedCorrection = Int.MIN_VALUE
 
     init {
         require(sampleRateHz >= 8_000) { "WEFAX sample rate is too low: $sampleRateHz" }
@@ -110,18 +128,18 @@ class WefaxIoc576Decoder(
                 Stage.SEARCHING,
                 Stage.IOC_576,
                 -> {
-                    processAcquisitionSample(sampleIndex, demodulated.frequencyHz)
+                    processAcquisitionSample(sampleIndex, demodulated)
                     if (
                         stage != Stage.PHASING &&
                         observeLateJoinCandidate(sampleIndex, demodulated)
                     ) {
-                        processRasterSample(sampleIndex, demodulated.frequencyHz)
+                        processRasterSample(sampleIndex, demodulated)
                     }
                 }
 
                 Stage.PHASING,
                 Stage.RECEIVING,
-                -> processRasterSample(sampleIndex, demodulated.frequencyHz)
+                -> processRasterSample(sampleIndex, demodulated)
 
                 Stage.COMPLETE -> Unit
             }
@@ -152,7 +170,12 @@ class WefaxIoc576Decoder(
         }
     }
 
-    private fun processAcquisitionSample(sampleIndex: Long, frequencyHz: Double) {
+    private fun processAcquisitionSample(
+        sampleIndex: Long,
+        demodulated: DemodulatedSample,
+    ) {
+        observeCoarseAfc(sampleIndex, demodulated)
+        val frequencyHz = demodulated.frequencyHz
         val newWhite = classifyWhite(frequencyHz)
         collectCandidateTone(frequencyHz, newWhite)
         if (newWhite == binaryWhite) return
@@ -248,14 +271,19 @@ class WefaxIoc576Decoder(
 
         val measuredBlack = candidateBlackSum / candidateBlackCount.coerceAtLeast(1)
         val measuredWhite = candidateWhiteSum / candidateWhiteCount.coerceAtLeast(1)
-        if (
+        val measuredTonesValid =
             candidateBlackCount >= MIN_TONE_SAMPLES &&
-            candidateWhiteCount >= MIN_TONE_SAMPLES &&
-            measuredWhite - measuredBlack >= MIN_TONE_SEPARATION_HZ
-        ) {
-            blackFrequencyHz = measuredBlack
-            whiteFrequencyHz = measuredWhite
+                candidateWhiteCount >= MIN_TONE_SAMPLES &&
+                measuredWhite - measuredBlack >= MIN_TONE_SEPARATION_HZ
+        val coarseAfcFresh = lastAfcEstimateSample != Long.MIN_VALUE &&
+            risingSample - lastAfcEstimateSample <=
+            (sampleRateHz * AFC_ESTIMATE_MAX_AGE_SECONDS).toLong()
+        val lockCenterHz = when {
+            coarseAfcFresh -> acquisitionCenterHz
+            measuredTonesValid -> (measuredBlack + measuredWhite) / 2.0
+            else -> acquisitionCenterHz
         }
+        lockAfcCenter(lockCenterHz)
 
         stage = Stage.PHASING
         lineStartSample = risingSample.toDouble()
@@ -270,6 +298,8 @@ class WefaxIoc576Decoder(
         listener.onDiagnostic(
             "WEFAX phasing_lock fixed_lpm=120 line_samples=${format(nominalLinePeriod)} " +
                 "black_hz=${format(blackFrequencyHz)} white_hz=${format(whiteFrequencyHz)} " +
+                "measured_black_hz=${format(measuredBlack)} " +
+                "measured_white_hz=${format(measuredWhite)} " +
                 "correction_hz=${frequencyCorrectionHz()}",
         )
     }
@@ -346,21 +376,23 @@ class WefaxIoc576Decoder(
     ) {
         lateJoin = true
         stage = Stage.RECEIVING
-        blackFrequencyHz = BLACK_FREQUENCY_HZ
-        whiteFrequencyHz = WHITE_FREQUENCY_HZ
-        lineStartSample = sampleIndex.toDouble()
+        val lateJoinCenter = lateJoinCenterEstimate(sampleIndex, spanHz)
+        lockAfcCenter(lateJoinCenter)
+        lineStartSample = sampleIndex + sampleRateHz * AFC_RETUNE_SETTLE_SECONDS
         nextLineBoundary = lineStartSample + nominalLinePeriod
         clearLineAccumulator()
         listener.onStage(
             Stage.RECEIVING,
             LATE_JOIN_MODE_NAME,
-            0,
+            frequencyCorrectionHz(),
             LATE_JOIN_CONFIDENCE,
         )
         listener.onDiagnostic(
             "WEFAX late_join_start sample=$sampleIndex " +
                 "valid=${format(validFraction * 100.0)}% span_hz=${format(spanHz)} " +
-                "deviation_hz=${format(deviationHz)} lpm=120 " +
+                "deviation_hz=${format(deviationHz)} " +
+                "afc_center_hz=${format(lateJoinCenter)} " +
+                "correction_hz=${frequencyCorrectionHz()} lpm=120 " +
                 "line_samples=${format(nominalLinePeriod)} raster=span_to_1809",
         )
         resetLateJoinWindow()
@@ -376,7 +408,8 @@ class WefaxIoc576Decoder(
         lateJoinFrequencyM2 = 0.0
     }
 
-    private fun processRasterSample(sampleIndex: Long, frequencyHz: Double) {
+    private fun processRasterSample(sampleIndex: Long, demodulated: DemodulatedSample) {
+        if (sampleIndex.toDouble() < lineStartSample) return
         while (sampleIndex.toDouble() >= nextLineBoundary) {
             finalizeRasterLine()
             lineStartSample = nextLineBoundary
@@ -384,19 +417,27 @@ class WefaxIoc576Decoder(
             clearLineAccumulator()
         }
 
-        appendLineLuma(frequencyToLuma(frequencyHz))
+        appendLineSample(demodulated)
     }
 
-    private fun appendLineLuma(value: Int) {
+    private fun appendLineSample(demodulated: DemodulatedSample) {
         if (lineLumaCount == lineLuma.size) {
             lineLuma = lineLuma.copyOf(lineLuma.size * 2)
+            lineFrequencyHz = lineFrequencyHz.copyOf(lineFrequencyHz.size * 2)
+            lineSignalLevel = lineSignalLevel.copyOf(lineSignalLevel.size * 2)
         }
-        lineLuma[lineLumaCount] = value
+        lineLuma[lineLumaCount] = frequencyToLuma(demodulated.frequencyHz)
+        lineFrequencyHz[lineLumaCount] = demodulated.frequencyHz
+        lineSignalLevel[lineLumaCount] = demodulated.signalLevel
         lineLumaCount += 1
     }
 
     private fun finalizeRasterLine() {
         resampleCurrentSpanToRaster()
+
+        if (stage == Stage.RECEIVING) {
+            updateTrackingAfcFromCompletedLine()
+        }
 
         if (stage == Stage.PHASING && isPhasingLine(currentLine)) {
             return
@@ -468,8 +509,212 @@ class WefaxIoc576Decoder(
         imagePixels = imagePixels.copyOf(newLines * IMAGE_WIDTH)
     }
 
+
+    /**
+     * WEFAX-only coarse AFC. The audio receiver may shift both fax tones together, so acquisition
+     * cannot assume that the black/white midpoint is always 1900 Hz. A short decimated histogram
+     * finds the two persistent tone clusters whose separation still matches the 800 Hz WEFAX
+     * deviation. The selected midpoint is bounded to a ±1000 Hz correction and is used only by
+     * this decoder; raw PCM and every SSTV decoder remain untouched.
+     */
+    private fun observeCoarseAfc(
+        sampleIndex: Long,
+        demodulated: DemodulatedSample,
+    ) {
+        if (afcWindowStartSample == Long.MIN_VALUE) {
+            afcWindowStartSample = sampleIndex
+        }
+
+        afcDecimationCounter += 1
+        if (afcDecimationCounter >= AFC_DECIMATION) {
+            afcDecimationCounter = 0
+            if (
+                demodulated.signalLevel >= AFC_MIN_SIGNAL_LEVEL &&
+                demodulated.frequencyHz in AFC_HISTOGRAM_MIN_HZ..AFC_HISTOGRAM_MAX_HZ
+            ) {
+                val bin = ((demodulated.frequencyHz - AFC_HISTOGRAM_MIN_HZ) /
+                    AFC_HISTOGRAM_BIN_HZ).toInt()
+                    .coerceIn(0, afcHistogram.lastIndex)
+                afcHistogram[bin] += 1
+                afcWindowObservations += 1
+            }
+        }
+
+        val elapsed = sampleIndex - afcWindowStartSample
+        if (elapsed < (sampleRateHz * AFC_WINDOW_SECONDS).toLong()) return
+
+        estimateAfcCenter()?.let { estimate ->
+            val previousCenter = acquisitionCenterHz
+            acquisitionCenterHz = estimate.centerHz
+            afcEstimateCount += 1
+            lastAfcEstimateSample = sampleIndex
+            if (kotlin.math.abs(previousCenter - acquisitionCenterHz) >=
+                AFC_RESTART_THRESHOLD_HZ
+            ) {
+                resetAcquisitionForAfcChange()
+            }
+            listener.onDiagnostic(
+                "WEFAX afc_estimate center_hz=${format(acquisitionCenterHz)} " +
+                    "correction_hz=${frequencyCorrectionFromCenter(acquisitionCenterHz)} " +
+                    "separation_hz=${format(estimate.separationHz)} " +
+                    "weak_peak=${estimate.weakPeakCount} observations=$afcWindowObservations " +
+                    "estimate=$afcEstimateCount",
+            )
+        }
+
+        afcHistogram.fill(0)
+        afcWindowObservations = 0
+        afcWindowStartSample = sampleIndex
+    }
+
+    private fun estimateAfcCenter(): AfcEstimate? {
+        if (afcWindowObservations < AFC_MIN_OBSERVATIONS) return null
+
+        val smoothed = IntArray(afcHistogram.size)
+        for (index in afcHistogram.indices) {
+            val left = afcHistogram.getOrElse(index - 1) { 0 }
+            val center = afcHistogram[index]
+            val right = afcHistogram.getOrElse(index + 1) { 0 }
+            smoothed[index] = left + center * 2 + right
+        }
+
+        var bestLow = -1
+        var bestHigh = -1
+        var bestWeak = 0
+        var bestStrong = 0
+        var bestScore = Long.MIN_VALUE
+        for (low in smoothed.indices) {
+            val lowHz = histogramBinCenter(low)
+            val firstHigh = histogramIndex(lowHz + AFC_MIN_TONE_SEPARATION_HZ)
+            val lastHigh = histogramIndex(lowHz + AFC_MAX_TONE_SEPARATION_HZ)
+            for (high in firstHigh.coerceAtLeast(low + 1)..lastHigh.coerceAtMost(smoothed.lastIndex)) {
+                val lowCount = smoothed[low]
+                val highCount = smoothed[high]
+                val weak = minOf(lowCount, highCount)
+                val strong = maxOf(lowCount, highCount)
+                val score = weak.toLong() * AFC_WEAK_PEAK_WEIGHT + strong
+                if (score > bestScore) {
+                    bestScore = score
+                    bestLow = low
+                    bestHigh = high
+                    bestWeak = weak
+                    bestStrong = strong
+                }
+            }
+        }
+
+        val minimumWeakPeak = maxOf(
+            AFC_MIN_WEAK_PEAK_COUNT,
+            (afcWindowObservations * AFC_MIN_WEAK_PEAK_FRACTION).roundToInt(),
+        )
+        val minimumStrongPeak = maxOf(
+            AFC_MIN_STRONG_PEAK_COUNT,
+            (afcWindowObservations * AFC_MIN_STRONG_PEAK_FRACTION).roundToInt(),
+        )
+        if (
+            bestLow < 0 ||
+            bestHigh < 0 ||
+            bestWeak < minimumWeakPeak ||
+            bestStrong < minimumStrongPeak
+        ) {
+            return null
+        }
+
+        val lowHz = histogramPeakCentroid(bestLow)
+        val highHz = histogramPeakCentroid(bestHigh)
+        val separation = highHz - lowHz
+        if (separation !in AFC_MIN_TONE_SEPARATION_HZ..AFC_MAX_TONE_SEPARATION_HZ) {
+            return null
+        }
+
+        val center = ((lowHz + highHz) / 2.0).coerceIn(
+            CENTER_FREQUENCY_HZ - AFC_MAX_CORRECTION_HZ,
+            CENTER_FREQUENCY_HZ + AFC_MAX_CORRECTION_HZ,
+        )
+        return AfcEstimate(center, separation, bestWeak)
+    }
+
+    private fun histogramPeakCentroid(index: Int): Double {
+        var weighted = 0.0
+        var count = 0
+        for (candidate in (index - 1).coerceAtLeast(0)..(index + 1).coerceAtMost(afcHistogram.lastIndex)) {
+            val binCount = afcHistogram[candidate]
+            weighted += histogramBinCenter(candidate) * binCount
+            count += binCount
+        }
+        return if (count > 0) weighted / count else histogramBinCenter(index)
+    }
+
+    private fun histogramBinCenter(index: Int): Double =
+        AFC_HISTOGRAM_MIN_HZ + (index + 0.5) * AFC_HISTOGRAM_BIN_HZ
+
+    private fun histogramIndex(frequencyHz: Double): Int =
+        ((frequencyHz - AFC_HISTOGRAM_MIN_HZ) / AFC_HISTOGRAM_BIN_HZ).toInt()
+
+    private fun resetAcquisitionForAfcChange() {
+        binaryWhite = false
+        lastRisingSample = Long.MIN_VALUE
+        lastFallingSample = Long.MIN_VALUE
+        transitionsSinceRising = 0
+        goodPhasingIntervals = 0
+        iocHalfCycleStart = Long.MIN_VALUE
+        iocHalfCycles = 0
+        candidateBlackSum = 0.0
+        candidateBlackCount = 0L
+        candidateWhiteSum = 0.0
+        candidateWhiteCount = 0L
+        if (stage != Stage.RECEIVING && stage != Stage.COMPLETE) {
+            stage = Stage.SEARCHING
+            listener.onStage(
+                Stage.SEARCHING,
+                MODE_NAME,
+                frequencyCorrectionFromCenter(acquisitionCenterHz),
+                20,
+            )
+        }
+    }
+
+    private fun lateJoinCenterEstimate(sampleIndex: Long, spanHz: Double): Double {
+        val afcEstimateFresh = lastAfcEstimateSample != Long.MIN_VALUE &&
+            sampleIndex - lastAfcEstimateSample <=
+            (sampleRateHz * AFC_ESTIMATE_MAX_AGE_SECONDS).toLong()
+        val observedCenter = when {
+            lateJoinStrongValidObservations <= 0 -> acquisitionCenterHz
+            spanHz >= LATE_JOIN_AFC_MIN_SPAN_HZ ->
+                (lateJoinFrequencyMin + lateJoinFrequencyMax) / 2.0
+            afcEstimateFresh -> acquisitionCenterHz
+            else -> lateJoinFrequencyMean
+        }
+        return observedCenter.coerceIn(
+            CENTER_FREQUENCY_HZ - AFC_MAX_CORRECTION_HZ,
+            CENTER_FREQUENCY_HZ + AFC_MAX_CORRECTION_HZ,
+        )
+    }
+
+    /**
+     * Freeze one WEFAX correction for the page and retune the FM detector around the shifted
+     * 1900 Hz subcarrier. Raster conversion still uses the fixed 1500 Hz black / 2300 Hz white
+     * contract after subtracting this correction. This is intentionally page-stable: fades and
+     * changing picture content cannot drag the grayscale map after acquisition.
+     */
+    private fun lockAfcCenter(centerHz: Double) {
+        val boundedCenter = centerHz.coerceIn(
+            CENTER_FREQUENCY_HZ - AFC_MAX_CORRECTION_HZ,
+            CENTER_FREQUENCY_HZ + AFC_MAX_CORRECTION_HZ,
+        )
+        acquisitionCenterHz = boundedCenter
+        lockedFrequencyOffsetHz = boundedCenter - CENTER_FREQUENCY_HZ
+        blackFrequencyHz = BLACK_FREQUENCY_HZ + lockedFrequencyOffsetHz
+        whiteFrequencyHz = WHITE_FREQUENCY_HZ + lockedFrequencyOffsetHz
+        demodulator.tuneCenter(boundedCenter)
+        resetTrackingAfc()
+    }
+
+    private fun frequencyCorrectionFromCenter(centerHz: Double): Int =
+        (CENTER_FREQUENCY_HZ - centerHz).roundToInt()
+
     private fun classifyWhite(frequencyHz: Double): Boolean {
-        val center = (BLACK_FREQUENCY_HZ + WHITE_FREQUENCY_HZ) / 2.0
+        val center = acquisitionCenterHz
         return if (binaryWhite) {
             frequencyHz >= center - ACQUISITION_HYSTERESIS_HZ
         } else {
@@ -489,8 +734,9 @@ class WefaxIoc576Decoder(
     }
 
     private fun frequencyToLuma(frequencyHz: Double): Int {
-        val span = (whiteFrequencyHz - blackFrequencyHz).coerceAtLeast(MIN_TONE_SEPARATION_HZ)
-        return (((frequencyHz - blackFrequencyHz) * 255.0) / span)
+        val correctedFrequencyHz = frequencyHz - lockedFrequencyOffsetHz
+        return (((correctedFrequencyHz - BLACK_FREQUENCY_HZ) * 255.0) /
+            (WHITE_FREQUENCY_HZ - BLACK_FREQUENCY_HZ))
             .roundToInt()
             .coerceIn(0, 255)
     }
@@ -563,13 +809,247 @@ class WefaxIoc576Decoder(
         }
     }
 
+    /**
+     * Late join remains completely independent from AFC refinement: it starts on the existing
+     * signal-presence detector and fixed 120-LPM clock. After reception is already running, each
+     * completed half-second line is reduced to a small phase profile of uncorrected frequencies.
+     *
+     * Standard 120/576 picture lines contain a 25 ms white reference pulse once per line. Because
+     * late join may begin at any horizontal phase, the pulse can appear anywhere inside our local
+     * line span, but it repeats at the same phase every 0.5 seconds. Across the rolling window, the
+     * phase whose lower-percentile frequency remains highest is therefore an invariant white-tone
+     * anchor. Ordinary picture content may be bright on one line, but it cannot bias the estimate
+     * unless it remains white at the same phase across nearly every line.
+     *
+     * The measured reference is absolute raw frequency. It never includes the currently applied
+     * correction, so there is no feedback loop. Correction changes happen only after a complete
+     * line and only as a scalar subtraction in frequencyToLuma(); the FM detector is not retuned or
+     * reset while the page is being received.
+     */
+    private fun updateTrackingAfcFromCompletedLine() {
+        val phaseProfile = buildTrackingPhaseProfile() ?: return
+        trackingPhaseRows[trackingNextRow] = phaseProfile
+        trackingNextRow = (trackingNextRow + 1) % TRACKING_WINDOW_LINES
+        if (trackingRowCount < TRACKING_WINDOW_LINES) trackingRowCount += 1
+        trackingAcceptedRows += 1
+
+        if (
+            trackingRowCount < TRACKING_MIN_WINDOW_LINES ||
+            trackingAcceptedRows % TRACKING_EVALUATION_INTERVAL_LINES != 0
+        ) {
+            return
+        }
+
+        val estimate = estimateTrackingOffsetFromWhiteReference()
+        if (estimate == null) {
+            trackingStableCandidateHz = Double.NaN
+            trackingStableCandidateCount = 0
+            return
+        }
+
+        if (
+            trackingStableCandidateHz.isNaN() ||
+            kotlin.math.abs(estimate.offsetHz - trackingStableCandidateHz) >
+            TRACKING_STABLE_AGREEMENT_HZ
+        ) {
+            trackingStableCandidateHz = estimate.offsetHz
+            trackingStableCandidateCount = 1
+            return
+        }
+
+        trackingStableCandidateHz += TRACKING_CANDIDATE_ALPHA *
+            (estimate.offsetHz - trackingStableCandidateHz)
+        trackingStableCandidateCount += 1
+        if (trackingStableCandidateCount < TRACKING_REQUIRED_STABLE_WINDOWS) return
+
+        val error = trackingStableCandidateHz - lockedFrequencyOffsetHz
+        if (kotlin.math.abs(error) < TRACKING_DEADBAND_HZ) return
+        val step = (error * TRACKING_CORRECTION_ALPHA).coerceIn(
+            -TRACKING_MAX_STEP_HZ,
+            TRACKING_MAX_STEP_HZ,
+        )
+        lockedFrequencyOffsetHz = (lockedFrequencyOffsetHz + step).coerceIn(
+            -AFC_MAX_CORRECTION_HZ,
+            AFC_MAX_CORRECTION_HZ,
+        )
+        blackFrequencyHz = BLACK_FREQUENCY_HZ + lockedFrequencyOffsetHz
+        whiteFrequencyHz = WHITE_FREQUENCY_HZ + lockedFrequencyOffsetHz
+
+        val correction = frequencyCorrectionHz()
+        if (
+            trackingLastReportedCorrection == Int.MIN_VALUE ||
+            kotlin.math.abs(correction - trackingLastReportedCorrection) >=
+            TRACKING_REPORT_DELTA_HZ
+        ) {
+            trackingLastReportedCorrection = correction
+            listener.onStage(
+                Stage.RECEIVING,
+                activeModeName(),
+                correction,
+                if (lateJoin) LATE_JOIN_CONFIDENCE else 100,
+            )
+            listener.onDiagnostic(
+                "WEFAX afc_white_reference phase_bin=${estimate.phaseBin} " +
+                    "white_hz=${format(estimate.whiteFrequencyHz)} " +
+                    "phase_support=${estimate.supportingRows}/${trackingRowCount} " +
+                    "phase_spread_hz=${format(estimate.spreadHz)} " +
+                    "measured_offset_hz=${format(trackingStableCandidateHz)} " +
+                    "applied_correction_hz=$correction",
+            )
+        }
+    }
+
+    private fun buildTrackingPhaseProfile(): DoubleArray? {
+        if (lineLumaCount < TRACKING_MIN_LINE_SAMPLES) return null
+        val sums = DoubleArray(TRACKING_PHASE_BINS)
+        val counts = IntArray(TRACKING_PHASE_BINS)
+        for (sample in 0 until lineLumaCount) {
+            val frequencyHz = lineFrequencyHz[sample]
+            if (
+                lineSignalLevel[sample] < TRACKING_MIN_SIGNAL_LEVEL ||
+                frequencyHz !in TRACKING_FREQUENCY_RANGE
+            ) {
+                continue
+            }
+            val bin = ((sample.toLong() * TRACKING_PHASE_BINS) / lineLumaCount)
+                .toInt()
+                .coerceIn(0, TRACKING_PHASE_BINS - 1)
+            sums[bin] += frequencyHz
+            counts[bin] += 1
+        }
+        val minimumPerBin = (lineLumaCount / TRACKING_PHASE_BINS / 3).coerceAtLeast(4)
+        val profile = DoubleArray(TRACKING_PHASE_BINS) { Double.NaN }
+        var validBins = 0
+        for (bin in profile.indices) {
+            if (counts[bin] >= minimumPerBin) {
+                profile[bin] = sums[bin] / counts[bin]
+                validBins += 1
+            }
+        }
+        return if (validBins >= TRACKING_MIN_VALID_PHASE_BINS) profile else null
+    }
+
+    private fun estimateTrackingOffsetFromWhiteReference(): TrackingEstimate? {
+        val robustPhase = DoubleArray(TRACKING_PHASE_BINS) { Double.NaN }
+        val phaseSupport = IntArray(TRACKING_PHASE_BINS)
+        val phaseSpread = DoubleArray(TRACKING_PHASE_BINS) { Double.POSITIVE_INFINITY }
+        val values = DoubleArray(trackingRowCount)
+
+        for (phase in 0 until TRACKING_PHASE_BINS) {
+            var count = 0
+            for (rowOffset in 0 until trackingRowCount) {
+                val row = trackingPhaseRows[rowOffset]
+                val value = row[phase]
+                if (!value.isNaN()) values[count++] = value
+            }
+            if (count < TRACKING_MIN_PHASE_SUPPORT_ROWS) continue
+            java.util.Arrays.sort(values, 0, count)
+            val quantileIndex = ((count - 1) * TRACKING_PHASE_LOWER_QUANTILE)
+                .roundToInt()
+                .coerceIn(0, count - 1)
+            robustPhase[phase] = values[quantileIndex]
+            phaseSupport[phase] = count
+            phaseSpread[phase] = values[count - 1] - values[0]
+        }
+
+        var bestStart = -1
+        var bestScore = Double.NEGATIVE_INFINITY
+        var bestSpread = Double.POSITIVE_INFINITY
+        var bestSupport = 0
+        for (start in 0 until TRACKING_PHASE_BINS) {
+            var sum = 0.0
+            var count = 0
+            var spreadSum = 0.0
+            var minimumSupport = Int.MAX_VALUE
+            for (offset in 0 until TRACKING_REFERENCE_WINDOW_BINS) {
+                val phase = (start + offset) % TRACKING_PHASE_BINS
+                val value = robustPhase[phase]
+                if (value.isNaN()) continue
+                sum += value
+                spreadSum += phaseSpread[phase]
+                minimumSupport = minOf(minimumSupport, phaseSupport[phase])
+                count += 1
+            }
+            if (count < TRACKING_MIN_REFERENCE_WINDOW_BINS) continue
+            val mean = sum / count
+            val spread = spreadSum / count
+            // Prefer the highest phase-stable plateau. A small spread penalty prevents a single
+            // noisy high-frequency pixel from outranking the repeated 25 ms reference pulse.
+            val score = mean - TRACKING_SPREAD_SCORE_WEIGHT * spread
+            if (score > bestScore) {
+                bestScore = score
+                bestStart = start
+                bestSpread = spread
+                bestSupport = minimumSupport
+            }
+        }
+        if (bestStart < 0 || bestSpread > TRACKING_MAX_PHASE_SPREAD_HZ) return null
+
+        var whiteSum = 0.0
+        var whiteCount = 0
+        val whiteValues = DoubleArray(TRACKING_REFERENCE_WINDOW_BINS)
+        for (offset in 0 until TRACKING_REFERENCE_WINDOW_BINS) {
+            val phase = (bestStart + offset) % TRACKING_PHASE_BINS
+            val value = robustPhase[phase]
+            if (!value.isNaN()) whiteValues[whiteCount++] = value
+        }
+        if (whiteCount < TRACKING_MIN_REFERENCE_WINDOW_BINS) return null
+        java.util.Arrays.sort(whiteValues, 0, whiteCount)
+        val trim = (whiteCount * TRACKING_REFERENCE_TRIM_FRACTION).toInt()
+            .coerceAtMost((whiteCount - 1) / 2)
+        for (index in trim until whiteCount - trim) whiteSum += whiteValues[index]
+        val used = whiteCount - 2 * trim
+        if (used <= 0) return null
+        val measuredWhiteHz = whiteSum / used
+        if (kotlin.math.abs(measuredWhiteHz - whiteFrequencyHz) >
+            TRACKING_MAX_REFERENCE_JUMP_HZ
+        ) {
+            return null
+        }
+        val offsetHz = (measuredWhiteHz - WHITE_FREQUENCY_HZ).coerceIn(
+            -AFC_MAX_CORRECTION_HZ,
+            AFC_MAX_CORRECTION_HZ,
+        )
+        return TrackingEstimate(
+            offsetHz = offsetHz,
+            whiteFrequencyHz = measuredWhiteHz,
+            phaseBin = bestStart,
+            supportingRows = bestSupport,
+            spreadHz = bestSpread,
+        )
+    }
+
+    private fun resetTrackingAfc() {
+        for (row in trackingPhaseRows) row.fill(Double.NaN)
+        trackingRowCount = 0
+        trackingNextRow = 0
+        trackingAcceptedRows = 0
+        trackingStableCandidateHz = Double.NaN
+        trackingStableCandidateCount = 0
+        trackingLastReportedCorrection = Int.MIN_VALUE
+    }
+
     private fun activeModeName(): String =
         if (lateJoin) LATE_JOIN_MODE_NAME else MODE_NAME
 
-    private fun frequencyCorrectionHz(): Int =
-        (((blackFrequencyHz + whiteFrequencyHz) / 2.0) - CENTER_FREQUENCY_HZ).roundToInt()
+    /** Correction applied to raw audio frequency; opposite sign from measured receiver offset. */
+    private fun frequencyCorrectionHz(): Int = (-lockedFrequencyOffsetHz).roundToInt()
 
     private fun format(value: Double): String = String.format(java.util.Locale.US, "%.3f", value)
+
+    private data class AfcEstimate(
+        val centerHz: Double,
+        val separationHz: Double,
+        val weakPeakCount: Int,
+    )
+
+    private data class TrackingEstimate(
+        val offsetHz: Double,
+        val whiteFrequencyHz: Double,
+        val phaseBin: Int,
+        val supportingRows: Int,
+        val spreadHz: Double,
+    )
 
     private data class DemodulatedSample(
         val frequencyHz: Double,
@@ -578,7 +1058,8 @@ class WefaxIoc576Decoder(
 
     private class FmSubcarrierDemodulator(sampleRateHz: Int) {
         private val sampleRate = sampleRateHz.toDouble()
-        private val oscillatorStep = 2.0 * PI * CENTER_FREQUENCY_HZ / sampleRate
+        private var tunedCenterHz = CENTER_FREQUENCY_HZ
+        private var oscillatorStep = 2.0 * PI * tunedCenterHz / sampleRate
         private val lowPassAlpha = 1.0 - exp(-2.0 * PI * BASEBAND_LOW_PASS_HZ / sampleRate)
         private val smoothAlpha = 1.0 - exp(-1.0 / (sampleRate * FREQUENCY_SMOOTH_SECONDS))
         private val iStages = DoubleArray(LOW_PASS_STAGES)
@@ -589,6 +1070,17 @@ class WefaxIoc576Decoder(
         private var previousBasebandPhase = 0.0
         private var havePhase = false
         private var smoothedFrequency = CENTER_FREQUENCY_HZ
+
+
+        fun tuneCenter(centerHz: Double) {
+            if (kotlin.math.abs(centerHz - tunedCenterHz) < 0.5) return
+            tunedCenterHz = centerHz
+            oscillatorStep = 2.0 * PI * tunedCenterHz / sampleRate
+            iStages.fill(0.0)
+            qStages.fill(0.0)
+            havePhase = false
+            smoothedFrequency = tunedCenterHz
+        }
 
         fun process(sample: Short): DemodulatedSample {
             val normalized = sample.toDouble() / 32768.0
@@ -614,7 +1106,7 @@ class WefaxIoc576Decoder(
             previousBasebandPhase = phase
             while (delta > PI) delta -= 2.0 * PI
             while (delta < -PI) delta += 2.0 * PI
-            val frequency = CENTER_FREQUENCY_HZ + delta * sampleRate / (2.0 * PI)
+            val frequency = tunedCenterHz + delta * sampleRate / (2.0 * PI)
             if (frequency in MIN_VALID_FREQUENCY_HZ..MAX_VALID_FREQUENCY_HZ) {
                 smoothedFrequency += smoothAlpha * (frequency - smoothedFrequency)
             }
@@ -635,11 +1127,11 @@ class WefaxIoc576Decoder(
         private const val BLACK_FREQUENCY_HZ = 1500.0
         private const val WHITE_FREQUENCY_HZ = 2300.0
         private const val ACQUISITION_HYSTERESIS_HZ = 75.0
-        private const val MIN_VALID_FREQUENCY_HZ = 900.0
-        private const val MAX_VALID_FREQUENCY_HZ = 2900.0
+        private const val MIN_VALID_FREQUENCY_HZ = 400.0
+        private const val MAX_VALID_FREQUENCY_HZ = 3400.0
         private const val MIN_TONE_SEPARATION_HZ = 420.0
         private const val MIN_TONE_SAMPLES = 200L
-        private const val BASEBAND_LOW_PASS_HZ = 720.0
+        private const val BASEBAND_LOW_PASS_HZ = 1600.0
         private const val LOW_PASS_STAGES = 4
         private const val FREQUENCY_SMOOTH_SECONDS = 0.0014
         private const val DEMODULATOR_WARMUP_SECONDS = 0.10
@@ -660,7 +1152,56 @@ class WefaxIoc576Decoder(
         private const val LATE_JOIN_FAST_DEVIATION_HZ = 38.0
         private const val LATE_JOIN_SLOW_DEVIATION_HZ = 14.0
         private const val LATE_JOIN_CONFIDENCE = 70
-        private val LATE_JOIN_FREQUENCY_RANGE = 1200.0..2600.0
+        private const val LATE_JOIN_AFC_MIN_SPAN_HZ = 180.0
+        private const val TRACKING_WINDOW_LINES = 24
+        private const val TRACKING_MIN_WINDOW_LINES = 12
+        private const val TRACKING_EVALUATION_INTERVAL_LINES = 3
+        private const val TRACKING_REQUIRED_STABLE_WINDOWS = 2
+        private const val TRACKING_PHASE_BINS = 200
+        private const val TRACKING_REFERENCE_WINDOW_BINS = 10
+        private const val TRACKING_MIN_REFERENCE_WINDOW_BINS = 8
+        private const val TRACKING_MIN_PHASE_SUPPORT_ROWS = 9
+        private const val TRACKING_MIN_VALID_PHASE_BINS = 160
+        private const val TRACKING_MIN_LINE_SAMPLES = 8_000
+        private const val TRACKING_MIN_SIGNAL_LEVEL = 0.006
+        private const val TRACKING_FREQUENCY_MIN_HZ = 400.0
+        private const val TRACKING_FREQUENCY_MAX_HZ = 3400.0
+        private val TRACKING_FREQUENCY_RANGE =
+            TRACKING_FREQUENCY_MIN_HZ..TRACKING_FREQUENCY_MAX_HZ
+        private const val TRACKING_PHASE_LOWER_QUANTILE = 0.20
+        private const val TRACKING_MAX_PHASE_SPREAD_HZ = 220.0
+        private const val TRACKING_MAX_REFERENCE_JUMP_HZ = 500.0
+        private const val TRACKING_SPREAD_SCORE_WEIGHT = 0.20
+        private const val TRACKING_REFERENCE_TRIM_FRACTION = 0.10
+        private const val TRACKING_STABLE_AGREEMENT_HZ = 45.0
+        private const val TRACKING_CANDIDATE_ALPHA = 0.40
+        private const val TRACKING_CORRECTION_ALPHA = 0.45
+        private const val TRACKING_MAX_STEP_HZ = 80.0
+        private const val TRACKING_DEADBAND_HZ = 3.0
+        private const val TRACKING_REPORT_DELTA_HZ = 5
+        private const val AFC_MAX_CORRECTION_HZ = 1000.0
+        private const val AFC_WINDOW_SECONDS = 0.35
+        private const val AFC_DECIMATION = 16
+        private const val AFC_MIN_SIGNAL_LEVEL = 0.008
+        private const val AFC_HISTOGRAM_MIN_HZ = 400.0
+        private const val AFC_HISTOGRAM_MAX_HZ = 3400.0
+        private const val AFC_HISTOGRAM_BIN_HZ = 25.0
+        private const val AFC_HISTOGRAM_BIN_COUNT =
+            ((AFC_HISTOGRAM_MAX_HZ - AFC_HISTOGRAM_MIN_HZ) /
+                AFC_HISTOGRAM_BIN_HZ).toInt() + 1
+        private const val AFC_MIN_TONE_SEPARATION_HZ = 620.0
+        private const val AFC_MAX_TONE_SEPARATION_HZ = 980.0
+        private const val AFC_MIN_OBSERVATIONS = 120
+        private const val AFC_MIN_WEAK_PEAK_COUNT = 8
+        private const val AFC_MIN_STRONG_PEAK_COUNT = 20
+        private const val AFC_MIN_WEAK_PEAK_FRACTION = 0.008
+        private const val AFC_MIN_STRONG_PEAK_FRACTION = 0.025
+        private const val AFC_WEAK_PEAK_WEIGHT = 8L
+        private const val AFC_RESTART_THRESHOLD_HZ = 35.0
+        private const val AFC_ESTIMATE_MAX_AGE_SECONDS = 1.0
+        private const val AFC_RETUNE_SETTLE_SECONDS = 0.06
+        private val LATE_JOIN_FREQUENCY_RANGE =
+            (MIN_VALID_FREQUENCY_HZ + 80.0)..(MAX_VALID_FREQUENCY_HZ - 80.0)
         private val ASYMMETRIC_WHITE_FRACTION = 0.015..0.13
         private val SYMMETRIC_WHITE_FRACTION = 0.34..0.66
     }

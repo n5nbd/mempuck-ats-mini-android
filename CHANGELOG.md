@@ -1,3 +1,46 @@
+## 1.0.1-dev.05 — phase-stable WEFAX white-reference AFC
+
+- Preserve the proven full-start and arbitrary-phase mid-image acquisition paths from dev.04; AFC refinement begins only after reception is already running.
+- Replace support-edge averaging with a rolling phase profile that finds the protocol's recurring 25 ms white reference pulse at any horizontal phase.
+- Estimate offset from uncorrected raw frequency, require repeated cross-line agreement, and reject candidates too far from the current plausible white tone.
+- Apply bounded correction changes only between complete lines as a scalar frequency subtraction; never retune or reset the FM detector during the page.
+- Prevent picture content, fades, or the current correction from feeding back into the estimator.
+- Add regressions for arbitrary-phase late join across 0, ±250, ±500, and ±750 Hz, attenuated positive-offset white references, zero-offset no-runaway behavior, and acquisition non-restart.
+- Leave fixed 120 LPM timing, 1809-pixel raster geometry, raw PCM, and every SSTV path unchanged.
+- Update About/build metadata to `1.0.1-dev.05`, version code 106.
+
+## 1.0.1-dev.04 — bounded WEFAX support-edge AFC
+
+- Reverted the rejected dev.03 rolling minimum-window estimator that could chase picture content and run away.
+- Kept the proven wide full-start and mid-join WEFAX acquisition behavior.
+- Defined the displayed value as the correction applied to the audio frequency, so a +500 Hz receiver offset reports approximately -500 Hz correction.
+- Added a 32-line raw-frequency histogram for late-join refinement.
+- Estimates black and white support edges independently and updates only when both imply the same offset and the observed tone span is wide enough.
+- Requires three agreeing rolling windows and applies bounded steps; narrow or one-sided image content cannot move the correction.
+- Keeps the estimator independent of corrected output and never retunes the demodulator during tracking, preventing positive feedback.
+- Left fixed 120 LPM timing, 1809-pixel raster geometry, raw PCM, and SSTV unchanged.
+
+## 1.0.1-dev.02 — WEFAX true AFC grayscale normalization (2026-08-06)
+
+- Preserve the dev.01 wide WEFAX acquisition range and successful full-start/mid-join locking through the tested ±750 Hz offsets.
+- Freeze one page-level WEFAX frequency correction at acquisition instead of allowing picture content or fades to change the tone map.
+- Retune the WEFAX FM detector around the shifted 1900 Hz subcarrier after lock so large offsets are demodulated near baseband center.
+- Subtract the locked correction from every raster sample, then map the fixed 1500 Hz black and 2300 Hz white tones across the standard 800 Hz span.
+- Use the same correction path for normal phasing acquisition and mid-image late join.
+- Preserve fixed 120 LPM timing, 1809-pixel raster construction, raw PCM, brightness/contrast editing, and all SSTV paths unchanged.
+- Add full-start and late-join grayscale-invariance regressions across 0, ±250, ±500, and ±750 Hz; all 11 standalone WEFAX regressions pass.
+- Update About/build metadata to `1.0.1-dev.02`, version code 103.
+
+## 1.0.1-dev.01 — WEFAX wide-range AFC (2026-08-06)
+
+- Expand WEFAX-only audio AFC from fixed 1900 Hz acquisition assumptions to a bounded ±1000 Hz correction range.
+- Add a decimated coarse tone histogram that identifies the shifted black/white pair by its expected WEFAX tone separation before phasing lock.
+- Widen only the WEFAX FM-demodulator baseband so both 1500/2300 Hz tones remain measurable at large common offsets.
+- Normalize late-join WEFAX pages from their observed tone range instead of forcing nominal 1500/2300 Hz mapping.
+- Preserve raw PCM, fixed 120 LPM / IOC 576 timing, 1809-pixel sync-to-sync raster construction, page-lock behavior, and every SSTV path unchanged.
+- Add synthetic regressions for phasing acquisition at ±850 Hz and late-join normalization at ±400 Hz.
+- Update About/build metadata to `1.0.1-dev.01`, version code 102.
+
 ## 0.36.0-dev.32 — Scottie S2 live decoder (2026-08-02)
 
 - Add Scottie S2 SSTV decoding at 320 × 256 with VIS code 56, 88.064 ms RGB channels, and 277.692 ms line timing.
