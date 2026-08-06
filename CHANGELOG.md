@@ -1,3 +1,11 @@
+## 1.0.1 — wider, stable WEFAX AFC (2026-08-06)
+
+- Promote the hardware-tested `1.0.1-dev.05` WEFAX AFC slice to release `1.0.1`, version code 107, without changing accepted decoder behavior.
+- Acquire standard IOC 576 / 120 LPM WEFAX from the phasing header or from an arbitrary mid-image late start across substantial receiver audio-frequency error.
+- Apply bounded, phase-stable WEFAX frequency correction between complete lines while leaving the FM detector and pixel path continuous.
+- Preserve the fixed 1809-pixel raster, raw PCM retention, image editor, SAVE/SHARE workflow, and all SSTV paths.
+- Continue recommending receiver-frequency calibration; AFC provides tolerance and recovery rather than replacing calibration.
+
 ## 1.0.1-dev.05 — phase-stable WEFAX white-reference AFC
 
 - Preserve the proven full-start and arbitrary-phase mid-image acquisition paths from dev.04; AFC refinement begins only after reception is already running.
