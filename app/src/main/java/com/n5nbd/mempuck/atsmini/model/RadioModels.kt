@@ -98,6 +98,12 @@ enum class StartupReconnectStage {
     Verifying,
 }
 
+enum class StartupReconnectOutcome {
+    Pending,
+    Connected,
+    NeedsConfiguration,
+}
+
 data class RadioSnapshot(
     val scanning: Boolean = false,
     val devices: List<AtsDevice> = emptyList(),
@@ -111,5 +117,6 @@ data class RadioSnapshot(
     val tuneState: TuneState = TuneState.Idle,
     val vfoScanning: Boolean = false,
     val startupReconnectStage: StartupReconnectStage = StartupReconnectStage.Idle,
+    val startupReconnectOutcome: StartupReconnectOutcome = StartupReconnectOutcome.Pending,
     val log: List<String> = emptyList(),
 )

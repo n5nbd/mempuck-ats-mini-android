@@ -5,7 +5,10 @@ import org.junit.Test
 
 class StartupReconnectStageTest {
     @Test
-    fun radioSnapshotStartsWithoutReconnectSplash() {
-        assertEquals(StartupReconnectStage.Idle, RadioSnapshot().startupReconnectStage)
+    fun radioSnapshotStartsWithOneContinuousStartupSplash() {
+        val snapshot = RadioSnapshot()
+
+        assertEquals(StartupReconnectStage.Idle, snapshot.startupReconnectStage)
+        assertEquals(StartupReconnectOutcome.Pending, snapshot.startupReconnectOutcome)
     }
 }

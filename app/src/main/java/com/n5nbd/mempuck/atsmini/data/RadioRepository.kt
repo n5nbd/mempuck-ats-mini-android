@@ -14,6 +14,7 @@ import com.n5nbd.mempuck.atsmini.model.LinkState
 import com.n5nbd.mempuck.atsmini.model.RadioMode
 import com.n5nbd.mempuck.atsmini.model.RadioSnapshot
 import com.n5nbd.mempuck.atsmini.model.StatusStreamState
+import com.n5nbd.mempuck.atsmini.model.StartupReconnectOutcome
 import com.n5nbd.mempuck.atsmini.model.StartupReconnectStage
 import com.n5nbd.mempuck.atsmini.model.TuneState
 import com.n5nbd.mempuck.atsmini.model.TuningProtocol
@@ -127,6 +128,9 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
 
         val savedAddress = preferences.getString(LAST_VERIFIED_RADIO_ADDRESS, null)
         if (savedAddress.isNullOrBlank()) {
+            _state.value = _state.value.copy(
+                startupReconnectOutcome = StartupReconnectOutcome.NeedsConfiguration,
+            )
             appendLog("No saved ATS Mini; starting receiver scan")
             startFullScan()
             return
@@ -140,6 +144,7 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
             devices = emptyList(),
             capability = CapabilityState.NotChecked,
             startupReconnectStage = StartupReconnectStage.Looking,
+            startupReconnectOutcome = StartupReconnectOutcome.Pending,
         )
         appendLog("Looking for saved ATS Mini $savedAddress")
         client.startScan(
@@ -200,6 +205,11 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
             } else {
                 StartupReconnectStage.Idle
             },
+            startupReconnectOutcome = if (startupConnection) {
+                StartupReconnectOutcome.Pending
+            } else {
+                _state.value.startupReconnectOutcome
+            },
         )
         appendLog("Connecting to ${device.name ?: device.address}")
         client.connect(device)
@@ -225,6 +235,7 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
         startupConnectingAddress = null
         _state.value = _state.value.copy(
             startupReconnectStage = StartupReconnectStage.Idle,
+            startupReconnectOutcome = StartupReconnectOutcome.NeedsConfiguration,
         )
         if (disconnectCurrent) client.disconnect()
         startFullScan()
@@ -447,11 +458,17 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
             return
         }
 
+        val startupConnectionComplete = startupConnectingAddress != null
         _state.value = _state.value.copy(
             capability = CapabilityState.Supported(
                 protocol = TuningProtocol.LegacyAdHoc,
                 version = status.appVersion,
             ),
+            startupReconnectOutcome = if (startupConnectionComplete) {
+                StartupReconnectOutcome.Connected
+            } else {
+                _state.value.startupReconnectOutcome
+            },
         )
         appendLog("Using stock ATS protocol with B/M/F status verification")
         rememberReadyReceiver()
@@ -516,6 +533,12 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
     }
 
     override fun onDisconnected() {
+        val startupDisconnected = startupFlowActive
+        if (startupDisconnected) {
+            startupFlowActive = false
+            startupTargetAddress = null
+            startupConnectingAddress = null
+        }
         cancelTimers()
         statusSeenSinceReady = false
         zProbeFailed = false
@@ -531,6 +554,11 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
             status = null,
             tuneState = TuneState.Idle,
             startupReconnectStage = StartupReconnectStage.Idle,
+            startupReconnectOutcome = if (startupDisconnected) {
+                StartupReconnectOutcome.NeedsConfiguration
+            } else {
+                _state.value.startupReconnectOutcome
+            },
         )
         appendLog("BLE disconnected")
     }
@@ -545,11 +573,17 @@ class RadioRepository(context: Context) : AtsBleClient.Listener {
                     mainHandler.removeCallbacks(capabilityTimeout)
                     mainHandler.removeCallbacks(legacyStatusTimeout)
                     zProbeFailed = false
+                    val startupConnectionComplete = startupConnectingAddress != null
                     _state.value = _state.value.copy(
                         capability = CapabilityState.Supported(
                             protocol = TuningProtocol.AbsoluteZ,
                             version = event.version,
                         ),
+                        startupReconnectOutcome = if (startupConnectionComplete) {
+                            StartupReconnectOutcome.Connected
+                        } else {
+                            _state.value.startupReconnectOutcome
+                        },
                     )
                     appendLog("Using Z absolute-tune protocol v${event.version}")
                     rememberReadyReceiver()

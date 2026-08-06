@@ -12,8 +12,8 @@ android {
         applicationId = "com.n5nbd.mempuck.atsmini"
         minSdk = 26
         targetSdk = 36
-        versionCode = 95
-        versionName = "0.36.0-dev.49-r2"
+        versionCode = 101
+        versionName = "1.0.0-r1"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

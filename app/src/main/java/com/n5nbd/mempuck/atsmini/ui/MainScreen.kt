@@ -104,6 +104,7 @@ import com.n5nbd.mempuck.atsmini.model.memoryTagTokens
 import com.n5nbd.mempuck.atsmini.model.RadioMode
 import com.n5nbd.mempuck.atsmini.model.RadioSnapshot
 import com.n5nbd.mempuck.atsmini.model.StatusStreamState
+import com.n5nbd.mempuck.atsmini.model.StartupReconnectOutcome
 import com.n5nbd.mempuck.atsmini.model.StartupReconnectStage
 import com.n5nbd.mempuck.atsmini.model.TuneState
 import com.n5nbd.mempuck.atsmini.model.TuningProtocol
@@ -251,6 +252,8 @@ fun MainScreen(
     val nowSource by viewModel.nowSource.collectAsStateWithLifecycle()
     val memoryScanDirection by viewModel.memoryScanDirection.collectAsStateWithLifecycle()
     var tab by rememberSaveable { mutableStateOf(AppTab.Radio) }
+    var startupDestinationApplied by rememberSaveable { mutableStateOf(false) }
+    var expandRadioLinkOnConfig by rememberSaveable { mutableStateOf(false) }
     var memoryMode by rememberSaveable { mutableStateOf(false) }
     var selectedMemoryTagsValue by rememberSaveable { mutableStateOf("") }
     var favoriteMemorySelected by rememberSaveable { mutableStateOf(false) }
@@ -258,6 +261,18 @@ fun MainScreen(
     var interactionSequence by remember { mutableStateOf(0L) }
     var scanAfterPermission by rememberSaveable { mutableStateOf(false) }
     val colors = colorsFor(themeChoice, hueDegrees)
+    val showStartupReconnect = permissionsGranted &&
+        state.startupReconnectOutcome == StartupReconnectOutcome.Pending
+    val displayedTab = if (!startupDestinationApplied) {
+        when {
+            !permissionsGranted -> AppTab.Config
+            state.startupReconnectOutcome == StartupReconnectOutcome.Connected -> AppTab.Radio
+            state.startupReconnectOutcome == StartupReconnectOutcome.NeedsConfiguration -> AppTab.Config
+            else -> tab
+        }
+    } else {
+        tab
+    }
     val keepControllerAwake = state.link is LinkState.Ready
     val tuneScanActive = state.vfoScanning || memoryScanDirection != 0
     val availableMemoryTags = memoryTagCloud(memories)
@@ -294,6 +309,22 @@ fun MainScreen(
             viewModel.startScan()
         } else {
             viewModel.startAutoConnect()
+        }
+    }
+
+    LaunchedEffect(permissionsGranted, state.startupReconnectOutcome) {
+        if (!permissionsGranted || startupDestinationApplied) return@LaunchedEffect
+        when (state.startupReconnectOutcome) {
+            StartupReconnectOutcome.Pending -> Unit
+            StartupReconnectOutcome.Connected -> {
+                tab = AppTab.Radio
+                startupDestinationApplied = true
+            }
+            StartupReconnectOutcome.NeedsConfiguration -> {
+                tab = AppTab.Config
+                expandRadioLinkOnConfig = true
+                startupDestinationApplied = true
+            }
         }
     }
 
@@ -340,9 +371,11 @@ fun MainScreen(
                 color = colors.background,
                 contentColor = colors.foreground,
             ) {
-                if (state.startupReconnectStage != StartupReconnectStage.Idle) {
+                if (showStartupReconnect) {
                     StartupReconnectScreen(
-                        stage = state.startupReconnectStage,
+                        stage = state.startupReconnectStage.takeUnless {
+                            it == StartupReconnectStage.Idle
+                        } ?: StartupReconnectStage.Looking,
                         colors = colors,
                     )
                 } else {
@@ -361,12 +394,12 @@ fun MainScreen(
                         ) {
                             Header(
                                 state = state,
-                                selectedTab = tab,
+                                selectedTab = displayedTab,
                                 colors = colors,
                                 onTabSelected = { tab = it },
                             )
 
-                            when (tab) {
+                            when (displayedTab) {
                                 AppTab.Radio -> RadioScreen(
                                     state = state,
                                     memories = memories,
@@ -481,6 +514,13 @@ fun MainScreen(
                                     disconnect = viewModel::disconnect,
                                     probeCapability = viewModel::probeCapability,
                                     connect = viewModel::connect,
+                                    expandRadioLinkInitially = expandRadioLinkOnConfig ||
+                                        (!startupDestinationApplied &&
+                                            (!permissionsGranted ||
+                                                state.startupReconnectOutcome == StartupReconnectOutcome.NeedsConfiguration)),
+                                    onInitialRadioLinkExpansionConsumed = {
+                                        expandRadioLinkOnConfig = false
+                                    },
                                 )
                             }
                         }
@@ -2169,7 +2209,7 @@ private fun SourceScreen(
         Spacer(Modifier.height(8.dp))
         val curatedLoaded = activeSource == ActiveMemorySource.CURATED
         PuckButton(
-            text = if (curatedLoaded) "SRC LOADED" else "LOAD SRC",
+            text = if (curatedLoaded) "SRC LOADED" else "LOAD SAVED",
             selected = curatedLoaded,
             colors = colors,
             enabled = !curatedLoaded && !state.busy,
@@ -2511,12 +2551,23 @@ private fun ConfigScreen(
     disconnect: () -> Unit,
     probeCapability: () -> Unit,
     connect: (com.n5nbd.mempuck.atsmini.model.AtsDevice) -> Unit,
+    expandRadioLinkInitially: Boolean,
+    onInitialRadioLinkExpansionConsumed: () -> Unit,
 ) {
     var expandedSectionName by remember {
-        mutableStateOf("")
+        mutableStateOf(
+            if (expandRadioLinkInitially) ConfigSection.RadioLink.name else "",
+        )
     }
     val protocolScroll = rememberScrollState()
     val debugExpanded = expandedSectionName == ConfigSection.Debug.name
+
+    LaunchedEffect(expandRadioLinkInitially) {
+        if (expandRadioLinkInitially) {
+            expandedSectionName = ConfigSection.RadioLink.name
+            onInitialRadioLinkExpansionConsumed()
+        }
+    }
 
     fun toggleSection(section: ConfigSection) {
         expandedSectionName = if (expandedSectionName == section.name) "" else section.name
